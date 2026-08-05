@@ -32,6 +32,8 @@ jobs:
           echo "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f  gradle/wrapper/gradle-wrapper.jar" | sha256sum --check
       - name: Architecture guardrails
         run: python tools/check_architecture_guardrails.py
+      - name: Post-merge handoff unit tests
+        run: python -m unittest discover -s tools/tests -p 'test_post_merge_handoff.py' -v
       - name: Unit tests, lint, and debug build
         run: ./gradlew :mapping-core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace --no-daemon
       - name: Upload reports
