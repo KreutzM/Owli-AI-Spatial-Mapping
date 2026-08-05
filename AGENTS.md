@@ -63,7 +63,7 @@ Physical device runs are allowed when the task explicitly requires S23+ validati
 
 ## Post-merge handoff
 
-After a PR is merged, read the top-level pull-request comment marked `<!-- post-merge-handoff -->`. Treat that machine-generated comment as the source for the exact merge-commit SHA, `Quality` result, Automatic Dependency Submission disposition, `WebAgent Repo Pack` run, and `webagent-repo-pack` artifact ID and digest. Do not require maintainers to copy Actions URLs or run IDs manually when the marked comment is present. Do not claim post-merge verification is complete unless `Quality` and `WebAgent Repo Pack` are successful and the artifact ID and GitHub-reported SHA-256 digest are present; report the ADS state exactly when it is unavailable or unsuccessful.
+After a PR is merged, read the top-level pull-request comment that begins with `<!-- post-merge-handoff -->` and is authored by `github-actions[bot]`. Treat only that bot-owned machine-generated comment as the source for the exact merge-commit SHA, `Quality` result, Automatic Dependency Submission disposition, `WebAgent Repo Pack` run, and `webagent-repo-pack` artifact ID and digest. Manual recovery accepts only the required Repo Pack run ID and derives the target SHA from the validated run; a merge SHA is never entered separately. Do not require maintainers to copy Actions URLs or run IDs manually when the managed comment is present. Do not claim post-merge verification is complete unless `Quality` and `WebAgent Repo Pack` are successful and the artifact ID and GitHub-reported SHA-256 digest are present; report the ADS state exactly when it is unavailable or unsuccessful.
 
 ## End-of-run output
 

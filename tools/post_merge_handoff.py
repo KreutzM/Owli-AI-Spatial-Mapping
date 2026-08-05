@@ -15,17 +15,21 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 MARKER = "<!-- post-merge-handoff -->"
+ACTIONS_BOT_LOGIN = "github-actions[bot]"
+ACTIONS_BOT_TYPE = "Bot"
 QUALITY_WORKFLOW = "Quality"
 REPO_PACK_WORKFLOW = "WebAgent Repo Pack"
 ADS_WORKFLOW = "Automatic Dependency Submission (Gradle)"
 ARTIFACT_NAME = "webagent-repo-pack"
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+RUN_ID_PATTERN = re.compile(r"^[1-9][0-9]*$")
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
 
 @dataclass(frozen=True)
 class Trigger:
     merge_sha: str
-    repo_pack_run_id: int | None
+    repo_pack_run_id: int
 
 
 @dataclass(frozen=True)
@@ -141,33 +145,84 @@ class GitHubApi:
 def validate_sha(value: str) -> str:
     normalized = value.strip().lower()
     if not SHA_PATTERN.fullmatch(normalized):
-        raise ValueError("merge SHA must be exactly 40 lowercase hexadecimal characters")
+        raise ValueError("merge SHA must be exactly 40 hexadecimal characters")
     return normalized
 
 
+def parse_run_id(value: Any) -> int:
+    normalized = str(value or "").strip()
+    if not RUN_ID_PATTERN.fullmatch(normalized):
+        raise ValueError("repo_pack_run_id is required and must be a positive integer")
+    return int(normalized)
+
+
+def _repository_name(run: dict[str, Any], key: str) -> str:
+    repository = run.get(key) or {}
+    return str(repository.get("full_name") or "") if isinstance(repository, dict) else ""
+
+
+def validate_repo_pack_run(
+    run: dict[str, Any] | None,
+    repository: str,
+    *,
+    expected_sha: str | None = None,
+) -> list[str]:
+    if run is None:
+        return ["WebAgent Repo Pack run is missing"]
+
+    failures: list[str] = []
+    if run.get("name") != REPO_PACK_WORKFLOW:
+        failures.append(f"workflow name must be exactly {REPO_PACK_WORKFLOW}")
+    if _repository_name(run, "repository") != repository:
+        failures.append("repo-pack run repository does not match the current repository")
+    if _repository_name(run, "head_repository") != repository:
+        failures.append("repo-pack run head repository does not match the current repository")
+    if run.get("head_branch") != "main":
+        failures.append("repo-pack run head_branch must be main")
+    if run.get("status") != "completed":
+        failures.append("repo-pack run status must be completed")
+    if run.get("conclusion") != "success":
+        failures.append("repo-pack run conclusion must be success")
+
+    try:
+        run_sha = validate_sha(str(run.get("head_sha") or ""))
+    except ValueError:
+        run_sha = ""
+        failures.append("repo-pack run head_sha is not a valid full commit SHA")
+    if expected_sha is not None and run_sha and run_sha != expected_sha:
+        failures.append("repo-pack run does not match the exact merge SHA")
+
+    try:
+        parse_run_id(run.get("id"))
+    except ValueError:
+        failures.append("repo-pack run id is not a positive integer")
+    return failures
+
+
 def resolve_trigger(
+    api: Any,
     event_name: str,
     event: dict[str, Any],
-    dispatch_sha: str = "",
     dispatch_run_id: str = "",
 ) -> Trigger | None:
     if event_name == "workflow_run":
         run = event.get("workflow_run") or {}
-        head_repository = (run.get("head_repository") or {}).get("full_name")
-        event_repository = (event.get("repository") or {}).get("full_name")
-        if (
-            run.get("name") != REPO_PACK_WORKFLOW
-            or run.get("conclusion") != "success"
-            or run.get("head_branch") != "main"
-            or not head_repository
-            or head_repository != event_repository
-        ):
+        if not isinstance(run, dict):
             return None
-        return Trigger(validate_sha(str(run.get("head_sha", ""))), int(run["id"]))
+        failures = validate_repo_pack_run(run, api.repository)
+        if failures:
+            return None
+        return Trigger(validate_sha(str(run["head_sha"])), parse_run_id(run["id"]))
 
     if event_name == "workflow_dispatch":
-        run_id = int(dispatch_run_id) if dispatch_run_id.strip() else None
-        return Trigger(validate_sha(dispatch_sha), run_id)
+        run_id = parse_run_id(dispatch_run_id)
+        run = api.get_workflow_run(run_id)
+        failures = validate_repo_pack_run(run, api.repository)
+        if failures:
+            raise RuntimeError(
+                f"invalid recovery repo-pack run {run_id}: " + "; ".join(failures)
+            )
+        return Trigger(validate_sha(str(run["head_sha"])), run_id)
 
     raise ValueError(f"unsupported event: {event_name}")
 
@@ -221,31 +276,22 @@ def find_merged_pull(api: Any, sha: str) -> dict[str, Any]:
     matches = [
         pull
         for pull in api.list_commit_pulls(sha)
-        if pull.get("merged_at") and pull.get("merge_commit_sha") == sha
+        if pull.get("merged_at")
+        and pull.get("merge_commit_sha") == sha
+        and (pull.get("base") or {}).get("ref") == "main"
     ]
     if len(matches) != 1:
         raise RuntimeError(
-            f"expected exactly one merged pull request with merge_commit_sha={sha}; found {len(matches)}"
+            "expected exactly one pull request merged into main with "
+            f"merge_commit_sha={sha}; found {len(matches)}"
         )
     return matches[0]
 
 
-def validate_repo_pack_run(run: dict[str, Any] | None, sha: str) -> list[str]:
-    if run is None:
-        return ["WebAgent Repo Pack exact-SHA run is missing"]
-    failures: list[str] = []
-    if run.get("name") != REPO_PACK_WORKFLOW:
-        failures.append("repo-pack run has the wrong workflow name")
-    if run.get("head_sha") != sha:
-        failures.append("repo-pack run does not match the exact merge SHA")
-    if run.get("head_branch") != "main":
-        failures.append("repo-pack run is not associated with main")
-    if run.get("status") != "completed" or run.get("conclusion") != "success":
-        failures.append("WebAgent Repo Pack did not complete successfully")
-    return failures
-
-
-def find_artifact(api: Any, repo_pack_run: dict[str, Any] | None) -> tuple[dict[str, Any] | None, list[str]]:
+def find_artifact(
+    api: Any,
+    repo_pack_run: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
     if repo_pack_run is None or not repo_pack_run.get("id"):
         return None, ["webagent-repo-pack artifact cannot be resolved without a repo-pack run"]
     artifacts = [
@@ -257,11 +303,12 @@ def find_artifact(api: Any, repo_pack_run: dict[str, Any] | None) -> tuple[dict[
         return None, [
             f"expected exactly one {ARTIFACT_NAME} artifact on repo-pack run; found {len(artifacts)}"
         ]
+
     artifact = artifacts[0]
     failures: list[str] = []
     digest = str(artifact.get("digest") or "")
-    if not digest.startswith("sha256:"):
-        failures.append("GitHub did not report a sha256 artifact digest")
+    if not DIGEST_PATTERN.fullmatch(digest):
+        failures.append("artifact digest must be exactly sha256:<64 hexadecimal characters>")
     if artifact.get("expired"):
         failures.append("webagent-repo-pack artifact is expired")
     return artifact, failures
@@ -309,19 +356,31 @@ def render_comment(
     )
 
 
+def is_managed_handoff_comment(comment: dict[str, Any]) -> bool:
+    body = str(comment.get("body") or "")
+    user = comment.get("user") or {}
+    if not isinstance(user, dict):
+        return False
+    return (
+        body.startswith(MARKER)
+        and user.get("login") == ACTIONS_BOT_LOGIN
+        and user.get("type") == ACTIONS_BOT_TYPE
+    )
+
+
 def upsert_comment(api: Any, pull_number: int, body: str) -> tuple[int, str]:
     comments = api.list_issue_comments(pull_number)
-    marked = sorted(
-        [comment for comment in comments if MARKER in str(comment.get("body") or "")],
+    managed = sorted(
+        [comment for comment in comments if is_managed_handoff_comment(comment)],
         key=lambda comment: int(comment.get("id", 0)),
     )
-    if not marked:
+    if not managed:
         created = api.create_issue_comment(pull_number, body)
         return int(created["id"]), "created"
 
-    keeper = marked[0]
+    keeper = managed[0]
     api.update_issue_comment(int(keeper["id"]), body)
-    for duplicate in marked[1:]:
+    for duplicate in managed[1:]:
         api.delete_issue_comment(int(duplicate["id"]))
     return int(keeper["id"]), "updated"
 
@@ -335,17 +394,22 @@ def publish_handoff(
     sleeper: Callable[[float], None] = time.sleep,
 ) -> PublishedHandoff:
     sha = trigger.merge_sha
+    repo_pack = api.get_workflow_run(trigger.repo_pack_run_id)
+    repo_pack_failures = validate_repo_pack_run(
+        repo_pack,
+        api.repository,
+        expected_sha=sha,
+    )
+    if repo_pack_failures:
+        raise RuntimeError(
+            f"invalid trigger repo-pack run {trigger.repo_pack_run_id}: "
+            + "; ".join(repo_pack_failures)
+        )
+
     pull = find_merged_pull(api, sha)
     pull_number = int(pull["number"])
-
     initial_runs = api.list_workflow_runs(sha)
     quality = select_run(initial_runs, QUALITY_WORKFLOW, sha)
-
-    if trigger.repo_pack_run_id is not None:
-        repo_pack = api.get_workflow_run(trigger.repo_pack_run_id)
-    else:
-        repo_pack = select_run(initial_runs, REPO_PACK_WORKFLOW, sha)
-
     ads, ads_reason = wait_for_ads(
         api,
         sha,
@@ -353,17 +417,13 @@ def publish_handoff(
         delay_seconds=ads_delay_seconds,
         sleeper=sleeper,
     )
-    repo_pack_failures = validate_repo_pack_run(repo_pack, sha)
-    artifact, artifact_failures = find_artifact(
-        api, repo_pack if not repo_pack_failures else None
-    )
+    artifact, artifact_failures = find_artifact(api, repo_pack)
 
     failures: list[str] = []
     if quality is None:
         failures.append("Quality exact-SHA run is missing")
     elif quality.get("status") != "completed" or quality.get("conclusion") != "success":
         failures.append("Quality did not complete successfully")
-    failures.extend(repo_pack_failures)
     failures.extend(artifact_failures)
 
     body = render_comment(
@@ -388,24 +448,24 @@ def load_event(path: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    api = GitHubApi(
+        repository=os.environ.get("GITHUB_REPOSITORY", ""),
+        token=os.environ.get("GITHUB_TOKEN", ""),
+        api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+    )
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     event_path = os.environ.get("GITHUB_EVENT_PATH", "")
     event = load_event(event_path) if event_path else {}
     trigger = resolve_trigger(
+        api,
         event_name,
         event,
-        os.environ.get("HANDOFF_TARGET_SHA", ""),
         os.environ.get("HANDOFF_REPO_PACK_RUN_ID", ""),
     )
     if trigger is None:
         print("Post-merge handoff skipped: repo-pack run was not successful on main")
         return
 
-    api = GitHubApi(
-        repository=os.environ.get("GITHUB_REPOSITORY", ""),
-        token=os.environ.get("GITHUB_TOKEN", ""),
-        api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
-    )
     result = publish_handoff(
         api,
         trigger,

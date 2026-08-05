@@ -8,13 +8,9 @@ on:
       - completed
   workflow_dispatch:
     inputs:
-      merge_sha:
-        description: Exact merge commit SHA on main
-        required: true
-        type: string
       repo_pack_run_id:
-        description: Optional exact WebAgent Repo Pack run ID; looked up by SHA when omitted
-        required: false
+        description: Exact successful WebAgent Repo Pack run ID on main
+        required: true
         type: string
 
 permissions:
@@ -24,7 +20,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: post-merge-handoff-${{ github.event.workflow_run.head_sha || inputs.merge_sha || github.sha }}
+  group: post-merge-handoff-${{ github.event.workflow_run.head_sha || inputs.repo_pack_run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -41,7 +37,6 @@ jobs:
       - name: Create or update post-merge handoff
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          HANDOFF_TARGET_SHA: ${{ github.event.workflow_run.head_sha || inputs.merge_sha }}
           HANDOFF_REPO_PACK_RUN_ID: ${{ github.event.workflow_run.id || inputs.repo_pack_run_id }}
           HANDOFF_ADS_ATTEMPTS: '6'
           HANDOFF_ADS_DELAY_SECONDS: '10'
