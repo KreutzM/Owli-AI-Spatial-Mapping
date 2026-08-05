@@ -1,0 +1,14 @@
+# Repository Map
+
+| Topic | First paths |
+|---|---|
+| Build/toolchain | `settings.gradle.kts`, `gradle/libs.versions.toml`, module build files |
+| ARCore capability | `app/.../ar/ArCoreCapabilityProbe.kt`, manifest |
+| App shell | `app/.../MainActivity.kt`, `app/.../ui/BootstrapScreen.kt` |
+| Coordinate math | `mapping-core/.../geometry/`, `docs/COORDINATE_SYSTEMS.md` |
+| Depth projection | `mapping-core/.../depth/`, projector tests |
+| AVD tests | `app/src/androidTest/`, `.github/workflows/avd-smoke.yml` |
+| Architecture enforcement | `tools/check_architecture_guardrails.py` |
+| Repo download packs | `tools/create_repo_pack.py`, `.github/workflows/repo-pack.yml` |
+| Test-data policy | `docs/DATASET_POLICY.md`, `test-data/README.md` |
+| Roadmap | `docs/ROADMAP.md` |

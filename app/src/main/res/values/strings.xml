@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">Owli Spatial Mapping</string>
+    <string name="bootstrap_title">Spatial-Mapping-Diagnose</string>
+    <string name="bootstrap_subtitle">Technischer Starter – noch keine Navigation und keine Sicherheitsaussage.</string>
+    <string name="arcore_label">ARCore</string>
+    <string name="camera_label">Kameraberechtigung</string>
+    <string name="mapping_label">Mapping</string>
+    <string name="mapping_not_started">Noch nicht implementiert</string>
+    <string name="mapping_explanation">Dieser Stand prüft nur Gerätefähigkeit, Berechtigung und die Modulgrenzen. Unbekannt wird niemals als frei dargestellt.</string>
+    <string name="check_again">Erneut prüfen</string>
+    <string name="request_camera">Kamerazugriff anfordern</string>
+    <string name="camera_granted">Erteilt</string>
+    <string name="camera_missing">Nicht erteilt</string>
+    <string name="ar_checking">Prüfung läuft</string>
+    <string name="ar_supported_installed">Unterstützt und installiert</string>
+    <string name="ar_supported_not_installed">Unterstützt, Installation erforderlich</string>
+    <string name="ar_unsupported">Auf diesem Gerät nicht unterstützt</string>
+    <string name="ar_error">Prüfung fehlgeschlagen</string>
+    <string name="ar_transient">Ergebnis noch nicht verfügbar</string>
+    <string name="privacy_notice">ARCore-Hinweis</string>
+    <string name="privacy_text">Diese Anwendung nutzt Google Play-Dienste für AR (ARCore) von Google LLC. In diesem Bootstrap werden noch keine Kamera- oder Umgebungsdaten gespeichert.</string>
+</resources>

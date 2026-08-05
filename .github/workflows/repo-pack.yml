@@ -1,0 +1,35 @@
+name: WebAgent Repo Pack
+
+on:
+  workflow_run:
+    workflows: [Quality]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PACK_REF: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  pack:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PACK_REF }}
+          fetch-depth: 0
+      - name: Fetch refs for complete bundle
+        run: git fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+      - name: Create and verify pack
+        run: python tools/create_repo_pack.py --output dist/repo-pack --repository "${GITHUB_REPOSITORY}" --sha "${PACK_REF}"
+      - name: Upload stable-name WebAgent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webagent-repo-pack
+          retention-days: 90
+          if-no-files-found: error
+          path: dist/repo-pack/

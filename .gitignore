@@ -1,0 +1,35 @@
+# Gradle / Android
+.gradle/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / signing
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Generated test and repo packs
+artifacts/
+dist/
+test-data/recorded/*
+!test-data/recorded/README.md
+
+# The official wrapper JAR is securely bootstrapped on first use.
+# It may be committed later after verification.
+gradle/wrapper/gradle-wrapper.jar

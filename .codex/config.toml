@@ -1,0 +1,41 @@
+model = "gpt-5.6"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+personality = "pragmatic"
+
+[history]
+persistence = "save-all"
+
+[sandbox_workspace_write]
+network_access = true
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = false
+exclude = ["*AZURE_*", "*AWS_*", "*GCP_*", "*TOKEN*", "*SECRET*"]
+include_only = []
+
+[shell_environment_policy.set]
+KOTLIN_COMPILER_EXECUTION_STRATEGY = "in-process"
+
+[agents]
+max_threads = 4
+max_depth = 1
+
+[features.multi_agent_v2]
+hide_spawn_agent_metadata = false
+tool_namespace = "agents"
+
+[agents.repo_mapper]
+config_file = ".codex/agents/repo-mapper.toml"
+[agents.android_reviewer]
+config_file = ".codex/agents/android-reviewer.toml"
+[agents.spatial_math_reviewer]
+config_file = ".codex/agents/spatial-math-reviewer.toml"
+[agents.safety_reviewer]
+config_file = ".codex/agents/safety-reviewer.toml"
+[agents.test_planner]
+config_file = ".codex/agents/test-planner.toml"
+[agents.documentation]
+config_file = ".codex/agents/documentation.toml"

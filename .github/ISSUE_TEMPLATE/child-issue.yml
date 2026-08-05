@@ -1,0 +1,42 @@
+name: Implementation child issue
+description: One bounded implementation and review cycle
+title: ""
+labels: ["implementation"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: review
+    attributes:
+      label: Reviewer focus
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Required validation
+      description: Separate JVM, AVD, replay and physical-device evidence.
+    validations:
+      required: true

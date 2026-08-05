@@ -1,0 +1,20 @@
+name: Dependency Review
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    # GitHub's dependency-review action requires GitHub Advanced Security for private repositories.
+    # Keep a fresh private starter green; remove this guard when GHAS is enabled.
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
