@@ -29,8 +29,9 @@ It does **not** yet start an ARCore session, read camera frames, build a point c
 Requirements:
 
 - JDK 17
-- Android SDK Platform 36
-- internet access on the first run to obtain Gradle and dependencies
+- Android SDK Platform API 36.1 for the compile SDK
+- `targetSdk` remains API 36 and is not the compile SDK package requirement
+- internet access on the first run to obtain the Gradle distribution and dependencies
 
 PowerShell:
 
@@ -45,7 +46,7 @@ chmod +x gradlew scripts/*.sh
 ./gradlew :mapping-core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-The first wrapper invocation downloads the official Gradle 8.13 wrapper JAR and verifies its pinned SHA-256 checksum. See `gradle/wrapper/README.md`.
+The repository includes the verified Gradle 8.13 wrapper JAR. The existing bootstrap script remains the trusted recovery path when the JAR is absent and verifies the pinned SHA-256 checksum before use. See `gradle/wrapper/README.md`.
 
 ## AVD smoke test
 

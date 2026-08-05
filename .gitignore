@@ -32,4 +32,3 @@ test-data/recorded/*
 
 # The official wrapper JAR is securely bootstrapped on first use.
 # It may be committed later after verification.
-gradle/wrapper/gradle-wrapper.jar

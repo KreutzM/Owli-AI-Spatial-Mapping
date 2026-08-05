@@ -61,6 +61,10 @@ Physical device runs are allowed when the task explicitly requires S23+ validati
 - Prefer Kotlin/Java and existing Android APIs; no NDK or external 3D engine without an ADR and explicit approval.
 - Never commit secrets, private location data, identifiable recordings, signing material, or `local.properties`.
 
+## Post-merge handoff
+
+After a PR is merged, the handoff must record the exact merge-commit SHA, the URL of a successful `Quality` run for that commit, and the URL of a successful `WebAgent Repo Pack` run for that commit. Do not claim post-merge verification is complete until all three values have been checked.
+
 ## End-of-run output
 
 Always finish with:
