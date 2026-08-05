@@ -1,0 +1,48 @@
+name: Post-Merge Handoff
+
+on:
+  workflow_run:
+    workflows:
+      - WebAgent Repo Pack
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: Exact merge commit SHA on main
+        required: true
+        type: string
+      repo_pack_run_id:
+        description: Optional exact WebAgent Repo Pack run ID; looked up by SHA when omitted
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: post-merge-handoff-${{ github.event.workflow_run.head_sha || inputs.merge_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify deterministic handoff logic
+        run: python -m unittest discover -s tools/tests -p 'test_post_merge_handoff.py' -v
+      - name: Create or update post-merge handoff
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HANDOFF_TARGET_SHA: ${{ github.event.workflow_run.head_sha || inputs.merge_sha }}
+          HANDOFF_REPO_PACK_RUN_ID: ${{ github.event.workflow_run.id || inputs.repo_pack_run_id }}
+          HANDOFF_ADS_ATTEMPTS: '6'
+          HANDOFF_ADS_DELAY_SECONDS: '10'
+        run: python tools/post_merge_handoff.py

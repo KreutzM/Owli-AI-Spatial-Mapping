@@ -10,5 +10,6 @@
 | AVD tests | `app/src/androidTest/`, `.github/workflows/avd-smoke.yml` |
 | Architecture enforcement | `tools/check_architecture_guardrails.py` |
 | Repo download packs | `tools/create_repo_pack.py`, `.github/workflows/repo-pack.yml` |
+| Post-merge CI handoff | `.github/workflows/post-merge-handoff.yml`, `tools/post_merge_handoff.py` |
 | Test-data policy | `docs/DATASET_POLICY.md`, `test-data/README.md` |
 | Roadmap | `docs/ROADMAP.md` |

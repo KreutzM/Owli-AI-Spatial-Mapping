@@ -12,6 +12,8 @@ REQUIRED = [
     ROOT / "docs" / "DATASET_POLICY.md",
     ROOT / ".github" / "workflows" / "quality.yml",
     ROOT / ".github" / "workflows" / "repo-pack.yml",
+    ROOT / ".github" / "workflows" / "post-merge-handoff.yml",
+    ROOT / "tools" / "post_merge_handoff.py",
 ]
 
 errors = []
