@@ -13,6 +13,31 @@ Install the `app-debug.apk` produced from the exact Draft-PR head. Before runnin
 - Google Play Services for AR version;
 - battery level, charging state, display orientation, scene, and lighting.
 
+## Windows build/install/launch helper
+
+On Windows with PowerShell 7, Android platform tools, USB debugging, and an authorized phone connection, run the checked-in helper from any working directory:
+
+```powershell
+./scripts/Build-Install-Run.ps1
+./scripts/Build-Install-Run.ps1 -Serial R58M...
+./scripts/Build-Install-Run.ps1 -Serial R58M... -CaptureLogcat ./artifacts/s23plus-logcat.txt
+```
+
+The helper resolves the repository from its own path, builds the current checkout with `gradlew.bat :app:assembleDebug`, selects exactly one online ADB device unless `-Serial` is supplied, prints Git/device/APK provenance, installs `app-debug.apk` with `adb install -r`, and launches `com.owlitech.spatial/.MainActivity` unless `-NoLaunch` is used. Every ADB command after selection is scoped with `-s <serial>`.
+
+ADB discovery order is `-AdbPath`, `ANDROID_SDK_ROOT`, `ANDROID_HOME`, then `adb.exe` on `PATH`. Ambiguous, absent, offline, unauthorized, recovery, or sideload targets fail closed. `-NoBuild` is accepted only when the exact APK and the helper-generated provenance sidecar match the current Git HEAD, worktree fingerprint, and APK SHA-256; a failed build removes the prior expected APK before Gradle runs and never proceeds to installation.
+
+App-data clearing and camera-permission grants remain explicit opt-ins:
+
+```powershell
+./scripts/Build-Install-Run.ps1 -Serial R58M... -ClearAppData
+./scripts/Build-Install-Run.ps1 -Serial R58M... -GrantCameraPermission
+```
+
+`-CaptureLogcat <path>` performs one bounded app-PID-focused `logcat -d` snapshot after launch. It does not leave a background process running.
+
+The helper prepares and launches the exact checkout; it does **not** determine whether Galaxy S23+ validation passed. The human observations below must still be completed on the physical device and attached to the Draft PR for the exact head that was installed.
+
 Exercise and record all of the following:
 
 1. Start from the actual ARCore installation/update state and note whether the user-initiated install flow was required, completed, or already satisfied.

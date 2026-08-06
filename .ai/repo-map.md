@@ -3,6 +3,7 @@
 | Topic | First paths |
 |---|---|
 | Build/toolchain | `settings.gradle.kts`, `gradle/libs.versions.toml`, module build files |
+| Windows ADB validation helper | `scripts/Build-Install-Run.ps1`, `app/src/test/.../tooling/BuildInstallRunScriptTest.kt`, `docs/DEVICE_VALIDATION.md` |
 | ARCore capability/install | `app/.../ar/ArCoreCapabilityProbe.kt`, `ArInstallController.kt`, manifest |
 | ARCore diagnostic runtime | `app/.../ar/ArDiagnosticSessionController.kt`, `DiagnosticSessionCloseScheduler.kt`, `ArCoreAdapters.kt`, `DiagnosticGlSurfaceView.kt` |
 | App shell and diagnostics UI | `app/.../MainActivity.kt`, `app/.../ui/BootstrapScreen.kt` |
