@@ -38,10 +38,23 @@ fun interface ArCapabilityProbe {
     fun check(): ArCapability
 }
 
+enum class CameraPermissionRequestOutcome {
+    NONE,
+    GRANTED,
+    DENIED,
+}
+
+data class CameraPermissionRequestRecord(
+    val requestInFlight: Boolean = false,
+    val lastCompletedOutcome: CameraPermissionRequestOutcome = CameraPermissionRequestOutcome.NONE,
+)
+
 enum class CameraPermissionState {
     NOT_REQUESTED,
+    REQUEST_IN_FLIGHT,
     GRANTED,
     DENIED_CAN_ASK_AGAIN,
+    REVOKED_OR_RESET_REQUESTABLE,
     DENIED_PERMANENTLY,
 }
 
@@ -54,8 +67,10 @@ enum class CameraPermissionAction {
 
 fun CameraPermissionState.availableAction(): CameraPermissionAction = when (this) {
     CameraPermissionState.NOT_REQUESTED -> CameraPermissionAction.REQUEST
+    CameraPermissionState.REQUEST_IN_FLIGHT -> CameraPermissionAction.NONE
     CameraPermissionState.GRANTED -> CameraPermissionAction.NONE
     CameraPermissionState.DENIED_CAN_ASK_AGAIN -> CameraPermissionAction.RETRY
+    CameraPermissionState.REVOKED_OR_RESET_REQUESTABLE -> CameraPermissionAction.REQUEST
     CameraPermissionState.DENIED_PERMANENTLY -> CameraPermissionAction.OPEN_APPLICATION_SETTINGS
 }
 
@@ -90,11 +105,13 @@ enum class SessionFailure {
 
 sealed interface SessionLifecycleState {
     data object WaitingForPrerequisites : SessionLifecycleState
+    data object WaitingForPreviousSession : SessionLifecycleState
     data object Ready : SessionLifecycleState
     data object Creating : SessionLifecycleState
     data object Resuming : SessionLifecycleState
     data object Running : SessionLifecycleState
     data object Paused : SessionLifecycleState
+    data object Closing : SessionLifecycleState
     data object Closed : SessionLifecycleState
     data class Error(
         val operation: SessionOperation,

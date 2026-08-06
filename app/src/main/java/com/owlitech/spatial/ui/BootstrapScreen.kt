@@ -62,7 +62,7 @@ fun BootstrapScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
             text = stringResource(R.string.bootstrap_title),
@@ -126,7 +126,8 @@ fun BootstrapScreen(
             ) {
                 Text(stringResource(R.string.check_again))
             }
-            if (state.capability is ArCapability.InstallRequired ||
+            if (
+                state.capability is ArCapability.InstallRequired ||
                 state.capability == ArCapability.Unavailable(
                     com.owlitech.spatial.ar.ArUnavailableReason.USER_DECLINED_INSTALLATION,
                 )
@@ -155,11 +156,10 @@ fun BootstrapScreen(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         Text(
             text = stringResource(R.string.privacy_notice),
             style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.semantics { heading() },
         )
         Text(
             text = stringResource(R.string.privacy_text),
@@ -208,8 +208,12 @@ private fun IntrinsicsCard(observation: DiagnosticObservation?) {
 @Composable
 private fun permissionText(state: CameraPermissionState): String = when (state) {
     CameraPermissionState.NOT_REQUESTED -> stringResource(R.string.camera_not_requested)
+    CameraPermissionState.REQUEST_IN_FLIGHT -> stringResource(R.string.camera_request_in_flight)
     CameraPermissionState.GRANTED -> stringResource(R.string.camera_granted)
     CameraPermissionState.DENIED_CAN_ASK_AGAIN -> stringResource(R.string.camera_denied_retry)
+    CameraPermissionState.REVOKED_OR_RESET_REQUESTABLE -> stringResource(
+        R.string.camera_revoked_requestable,
+    )
     CameraPermissionState.DENIED_PERMANENTLY -> stringResource(R.string.camera_denied_permanently)
 }
 
@@ -224,18 +228,23 @@ private fun permissionActionText(action: CameraPermissionAction): String = when 
 private fun permissionActionAccessibilityText(action: CameraPermissionAction): String = when (action) {
     CameraPermissionAction.REQUEST -> "Kameraberechtigung anfragen"
     CameraPermissionAction.RETRY -> "Kameraberechtigung erneut anfragen"
-    CameraPermissionAction.OPEN_APPLICATION_SETTINGS -> "Anwendungseinstellungen für Kameraberechtigung öffnen"
+    CameraPermissionAction.OPEN_APPLICATION_SETTINGS ->
+        "Anwendungseinstellungen für Kameraberechtigung öffnen"
     CameraPermissionAction.NONE -> ""
 }
 
 @Composable
 private fun sessionText(state: SessionLifecycleState): String = when (state) {
     SessionLifecycleState.WaitingForPrerequisites -> stringResource(R.string.session_waiting)
+    SessionLifecycleState.WaitingForPreviousSession -> stringResource(
+        R.string.session_waiting_previous,
+    )
     SessionLifecycleState.Ready -> stringResource(R.string.session_ready)
     SessionLifecycleState.Creating -> stringResource(R.string.session_creating)
     SessionLifecycleState.Resuming -> stringResource(R.string.session_resuming)
     SessionLifecycleState.Running -> stringResource(R.string.session_running)
     SessionLifecycleState.Paused -> stringResource(R.string.session_paused)
+    SessionLifecycleState.Closing -> stringResource(R.string.session_closing)
     SessionLifecycleState.Closed -> stringResource(R.string.session_closed)
     is SessionLifecycleState.Error -> {
         "${sessionOperationText(state.operation)}: ${sessionFailureText(state.failure)}"
@@ -243,7 +252,9 @@ private fun sessionText(state: SessionLifecycleState): String = when (state) {
 }
 
 @Composable
-private fun trackingText(observation: DiagnosticObservation?): String = when (observation?.trackingState) {
+private fun trackingText(observation: DiagnosticObservation?): String = when (
+    observation?.trackingState
+) {
     DiagnosticTrackingState.TRACKING -> stringResource(R.string.tracking_tracking)
     DiagnosticTrackingState.PAUSED -> stringResource(R.string.tracking_paused)
     DiagnosticTrackingState.STOPPED -> stringResource(R.string.tracking_stopped)
@@ -256,10 +267,18 @@ private fun trackingFailureText(observation: DiagnosticObservation?): String = w
 ) {
     DiagnosticTrackingFailureReason.NONE -> stringResource(R.string.failure_none)
     DiagnosticTrackingFailureReason.BAD_STATE -> stringResource(R.string.failure_bad_state)
-    DiagnosticTrackingFailureReason.INSUFFICIENT_LIGHT -> stringResource(R.string.failure_insufficient_light)
-    DiagnosticTrackingFailureReason.EXCESSIVE_MOTION -> stringResource(R.string.failure_excessive_motion)
-    DiagnosticTrackingFailureReason.INSUFFICIENT_FEATURES -> stringResource(R.string.failure_insufficient_features)
-    DiagnosticTrackingFailureReason.CAMERA_UNAVAILABLE -> stringResource(R.string.failure_camera_unavailable)
+    DiagnosticTrackingFailureReason.INSUFFICIENT_LIGHT -> stringResource(
+        R.string.failure_insufficient_light,
+    )
+    DiagnosticTrackingFailureReason.EXCESSIVE_MOTION -> stringResource(
+        R.string.failure_excessive_motion,
+    )
+    DiagnosticTrackingFailureReason.INSUFFICIENT_FEATURES -> stringResource(
+        R.string.failure_insufficient_features,
+    )
+    DiagnosticTrackingFailureReason.CAMERA_UNAVAILABLE -> stringResource(
+        R.string.failure_camera_unavailable,
+    )
     DiagnosticTrackingFailureReason.UNKNOWN -> stringResource(R.string.failure_unknown)
     null -> stringResource(R.string.failure_not_available)
 }

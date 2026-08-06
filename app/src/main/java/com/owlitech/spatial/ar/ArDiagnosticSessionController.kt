@@ -1,16 +1,37 @@
 package com.owlitech.spatial.ar
 
+/**
+ * Owns at most one diagnostic Session adapter and never executes native close synchronously.
+ *
+ * All active-use state is protected by [lock]. Native pause and the close-scheduler handoff run
+ * after leaving that lock. Frame-stage failures revoke update eligibility immediately and ask the
+ * lifecycle coordinator to stop the surface before pausing and releasing the Session on main.
+ */
 class ArDiagnosticSessionController(
     private val sessionFactory: DiagnosticSessionFactory,
+    private val sessionCloseScheduler: DiagnosticSessionCloseScheduler,
     private val observationConverter: DiagnosticObservationConverter = DiagnosticObservationConverter(),
     private val clockNanos: () -> Long = System::nanoTime,
     private val minimumPublishIntervalNanos: Long = 125_000_000L,
+    private val onRuntimeReleaseRequested: (SessionOperation, Throwable) -> Unit = { _, _ -> },
+    private val onSessionSlotAvailable: (() -> Unit)? = null,
     private val onStateChanged: (SessionLifecycleState, DiagnosticObservation?) -> Unit,
 ) {
+    private data class ReleasePlan(
+        val session: DiagnosticSessionPort,
+        val pauseBeforeClose: Boolean,
+        val finalState: SessionLifecycleState,
+        val primaryError: Pair<SessionOperation, Throwable>? = null,
+    )
+
+    private val lock = Any()
     private var prerequisitesReady = false
     private var session: DiagnosticSessionPort? = null
     private var sessionResumed = false
+    private var updateEligible = false
+    private var resumeRequested = false
     private var terminallyClosed = false
+    private var waitingForSessionSlot = false
     private var lifecycleState: SessionLifecycleState = SessionLifecycleState.WaitingForPrerequisites
 
     private var surfaceReady = false
@@ -29,186 +50,290 @@ class ArDiagnosticSessionController(
         publish(lifecycleState, null)
     }
 
-    @Synchronized
     fun setPrerequisitesReady(ready: Boolean) {
-        if (terminallyClosed || prerequisitesReady == ready) return
-        prerequisitesReady = ready
-        if (!ready) {
-            releaseOwnedSession(SessionLifecycleState.WaitingForPrerequisites)
-        } else if (session == null) {
-            setLifecycle(SessionLifecycleState.Ready)
+        var releasePlan: ReleasePlan? = null
+        synchronized(lock) {
+            if (terminallyClosed || prerequisitesReady == ready) return
+            prerequisitesReady = ready
+            if (!ready) {
+                resumeRequested = false
+                releasePlan = detachOwnedSessionLocked(
+                    finalState = SessionLifecycleState.WaitingForPrerequisites,
+                )
+                if (releasePlan == null) {
+                    setLifecycleLocked(SessionLifecycleState.WaitingForPrerequisites)
+                }
+            } else if (session == null) {
+                setLifecycleLocked(SessionLifecycleState.Ready)
+            }
         }
+        releasePlan?.let(::executeReleasePlan)
     }
 
-    @Synchronized
-    fun resume() {
-        if (terminallyClosed || !prerequisitesReady || sessionResumed) return
-        val ownedSession = session ?: createSessionOrNull() ?: return
-        setLifecycle(SessionLifecycleState.Resuming)
+    fun resume() = synchronized(lock) {
+        if (terminallyClosed || !prerequisitesReady || sessionResumed) return@synchronized
+        resumeRequested = true
+        val ownedSession = session ?: createSessionOrWaitLocked() ?: return@synchronized
+        setLifecycleLocked(SessionLifecycleState.Resuming)
+
         try {
+            // Lifecycle resume is serialized with detachment. Native close is never performed here.
             ownedSession.resume()
+            if (session !== ownedSession || terminallyClosed || !prerequisitesReady || !resumeRequested) {
+                return@synchronized
+            }
             sessionResumed = true
-            setLifecycle(SessionLifecycleState.Running)
+            updateEligible = true
+            setLifecycleLocked(SessionLifecycleState.Running)
         } catch (error: Throwable) {
-            sessionResumed = false
-            setError(SessionOperation.RESUME, error)
+            if (session === ownedSession) {
+                sessionResumed = false
+                updateEligible = false
+                clearCurrentObservationLocked()
+                setErrorLocked(SessionOperation.RESUME, error)
+            }
         }
     }
 
-    @Synchronized
-    fun onSurfaceCreated(textureId: Int) {
-        if (terminallyClosed) return
+    fun onSurfaceCreated(textureId: Int) = synchronized(lock) {
+        if (terminallyClosed) return@synchronized
         surfaceReady = textureId > 0
         cameraTextureId = textureId
         configuredTextureId = 0
         displayGeometryDirty = true
     }
 
-    @Synchronized
-    fun onSurfaceChanged(displayRotation: Int, width: Int, height: Int) {
-        if (terminallyClosed) return
+    fun onSurfaceChanged(displayRotation: Int, width: Int, height: Int) = synchronized(lock) {
+        if (terminallyClosed) return@synchronized
         this.displayRotation = displayRotation
         viewportWidth = width
         viewportHeight = height
         displayGeometryDirty = true
     }
 
-    @Synchronized
-    fun onDisplayRotationChanged(displayRotation: Int) {
-        if (terminallyClosed || this.displayRotation == displayRotation) return
+    fun onDisplayRotationChanged(displayRotation: Int) = synchronized(lock) {
+        if (terminallyClosed || this.displayRotation == displayRotation) return@synchronized
         this.displayRotation = displayRotation
         displayGeometryDirty = true
     }
 
-    @Synchronized
-    fun onSurfaceDestroyed() {
-        surfaceReady = false
-        cameraTextureId = 0
-        configuredTextureId = 0
-        viewportWidth = 0
-        viewportHeight = 0
-        displayGeometryDirty = true
+    fun onSurfaceDestroyed() = synchronized(lock) {
+        invalidateSurfaceUseLocked()
     }
 
     /** Called exclusively from the GLSurfaceView render thread. */
-    @Synchronized
     fun updateFrame() {
-        if (!canUpdate()) return
-        val ownedSession = session ?: return
-        if (configuredTextureId != cameraTextureId) {
+        var runtimeFailure: Pair<SessionOperation, Throwable>? = null
+        synchronized(lock) {
+            if (!canUpdateLocked()) return
+            val ownedSession = session ?: return
+
+            if (configuredTextureId != cameraTextureId) {
+                try {
+                    ownedSession.setCameraTextureName(cameraTextureId)
+                    configuredTextureId = cameraTextureId
+                } catch (error: Throwable) {
+                    runtimeFailure = stopUpdatesForRuntimeFailureLocked(
+                        SessionOperation.CAMERA_TEXTURE,
+                        error,
+                    )
+                    return@synchronized
+                }
+            }
+
+            if (displayGeometryDirty) {
+                try {
+                    ownedSession.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
+                    displayGeometryDirty = false
+                } catch (error: Throwable) {
+                    runtimeFailure = stopUpdatesForRuntimeFailureLocked(
+                        SessionOperation.DISPLAY_GEOMETRY,
+                        error,
+                    )
+                    return@synchronized
+                }
+            }
+
             try {
-                ownedSession.setCameraTextureName(cameraTextureId)
-                configuredTextureId = cameraTextureId
+                val observation = observationConverter.convert(ownedSession.update())
+                lastObservation = observation
+                publishObservationIfDueLocked(observation)
             } catch (error: Throwable) {
-                stopAfterFrameError(SessionOperation.CAMERA_TEXTURE, error)
-                return
+                runtimeFailure = stopUpdatesForRuntimeFailureLocked(SessionOperation.UPDATE, error)
             }
         }
-        if (displayGeometryDirty) {
-            try {
-                ownedSession.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
-                displayGeometryDirty = false
-            } catch (error: Throwable) {
-                stopAfterFrameError(SessionOperation.DISPLAY_GEOMETRY, error)
-                return
-            }
-        }
-        try {
-            val observation = observationConverter.convert(ownedSession.update())
-            lastObservation = observation
-            publishObservationIfDue(observation)
-        } catch (error: Throwable) {
-            stopAfterFrameError(SessionOperation.UPDATE, error)
+        runtimeFailure?.let { (operation, error) ->
+            onRuntimeReleaseRequested(operation, error)
         }
     }
 
-    @Synchronized
+    /**
+     * Normal Activity pause. The coordinator has already stopped GLSurfaceView before this call.
+     * A successful pause retains Session ownership for foreground reuse.
+     */
     fun pause() {
-        if (terminallyClosed || !sessionResumed) return
-        sessionResumed = false
-        val ownedSession = session
+        val ownedSession = synchronized(lock) {
+            if (terminallyClosed || !sessionResumed) return
+            resumeRequested = false
+            sessionResumed = false
+            updateEligible = false
+            clearCurrentObservationLocked()
+            session
+        }
+
         try {
             ownedSession?.pause()
-            lastObservation = null
-            lastPublishedObservation = null
-            setLifecycle(SessionLifecycleState.Paused)
-        } catch (error: Throwable) {
-            // A failed pause must not leave a Session eligible for further updates or foreground
-            // reuse. Attempt terminal release while preserving the pause failure as the visible
-            // diagnostic state.
-            session = null
-            configuredTextureId = 0
-            lastObservation = null
-            lastPublishedObservation = null
-            try {
-                ownedSession?.close()
-            } catch (_: Throwable) {
-                // Preserve the primary pause failure. The adapter reference is discarded either way.
+            synchronized(lock) {
+                if (session === ownedSession && !terminallyClosed) {
+                    setLifecycleLocked(SessionLifecycleState.Paused)
+                }
             }
-            setError(SessionOperation.PAUSE, error)
+        } catch (error: Throwable) {
+            val releasePlan = synchronized(lock) {
+                if (session !== ownedSession || ownedSession == null) {
+                    null
+                } else {
+                    detachOwnedSessionLocked(
+                        finalState = errorState(SessionOperation.PAUSE, error),
+                        primaryError = SessionOperation.PAUSE to error,
+                        pauseBeforeClose = false,
+                    )
+                }
+            }
+            releasePlan?.let(::executeReleasePlan)
         }
     }
 
-    @Synchronized
+    /**
+     * Main-thread continuation for a frame-stage failure. The coordinator stops GLSurfaceView first,
+     * then calls this method to pause, detach, and asynchronously close the Session.
+     */
+    fun releaseAfterRuntimeFailure(operation: SessionOperation, error: Throwable) {
+        val releasePlan = synchronized(lock) {
+            if (terminallyClosed || session == null) return
+            resumeRequested = false
+            detachOwnedSessionLocked(
+                finalState = errorState(operation, error),
+                primaryError = operation to error,
+            )
+        }
+        releasePlan?.let(::executeReleasePlan)
+    }
+
+    /** Terminal release; returns before native Session.close() starts or completes. */
     fun close() {
-        if (terminallyClosed) return
-        if (sessionResumed) pause()
-        terminallyClosed = true
-        val ownedSession = session
-        session = null
-        if (ownedSession != null) {
-            try {
-                ownedSession.close()
-            } catch (error: Throwable) {
-                setError(SessionOperation.CLOSE, error)
-                return
+        val releasePlan = synchronized(lock) {
+            if (terminallyClosed) return
+            terminallyClosed = true
+            resumeRequested = false
+            val plan = detachOwnedSessionLocked(finalState = SessionLifecycleState.Closed)
+            if (plan == null) {
+                setLifecycleLocked(SessionLifecycleState.Closed)
             }
+            plan
         }
-        lastObservation = null
-        lastPublishedObservation = null
-        setLifecycle(SessionLifecycleState.Closed)
+        releasePlan?.let(::executeReleasePlan)
     }
 
-    @Synchronized
-    fun currentLifecycleState(): SessionLifecycleState = lifecycleState
+    fun currentLifecycleState(): SessionLifecycleState = synchronized(lock) { lifecycleState }
 
-    @Synchronized
-    fun hasOwnedSession(): Boolean = session != null
+    fun hasOwnedSession(): Boolean = synchronized(lock) { session != null }
 
-    private fun createSessionOrNull(): DiagnosticSessionPort? {
-        setLifecycle(SessionLifecycleState.Creating)
+    private fun createSessionOrWaitLocked(): DiagnosticSessionPort? {
+        if (!sessionCloseScheduler.tryAcquireSessionSlot()) {
+            val waitingState = when (sessionCloseScheduler.currentSlotState()) {
+                DiagnosticSessionSlotState.CLOSING -> SessionLifecycleState.Closing
+                DiagnosticSessionSlotState.OWNED,
+                DiagnosticSessionSlotState.AVAILABLE,
+                -> SessionLifecycleState.WaitingForPreviousSession
+            }
+            setLifecycleLocked(waitingState)
+            registerSessionSlotWaiterLocked()
+            return null
+        }
+
+        setLifecycleLocked(SessionLifecycleState.Creating)
         return try {
-            sessionFactory.create().also { session = it }
+            sessionFactory.create().also { created ->
+                session = created
+                waitingForSessionSlot = false
+            }
         } catch (error: Throwable) {
-            setError(SessionOperation.CREATE, error)
+            sessionCloseScheduler.releaseSessionSlot()
+            setErrorLocked(SessionOperation.CREATE, error)
             null
         }
     }
 
-    private fun releaseOwnedSession(nextState: SessionLifecycleState) {
-        if (sessionResumed) {
-            pause()
-            if (lifecycleState is SessionLifecycleState.Error) return
-        }
-        val ownedSession = session
-        session = null
-        sessionResumed = false
-        configuredTextureId = 0
-        lastObservation = null
-        lastPublishedObservation = null
-        if (ownedSession != null) {
-            try {
-                ownedSession.close()
-            } catch (error: Throwable) {
-                setError(SessionOperation.CLOSE, error)
-                return
-            }
-        }
-        setLifecycle(nextState)
+    private fun registerSessionSlotWaiterLocked() {
+        if (waitingForSessionSlot) return
+        waitingForSessionSlot = true
+        sessionCloseScheduler.notifyWhenAvailable(::onSessionSlotAvailable)
     }
 
-    private fun canUpdate(): Boolean =
+    private fun onSessionSlotAvailable() {
+        val shouldResume = synchronized(lock) {
+            waitingForSessionSlot = false
+            !terminallyClosed && prerequisitesReady && resumeRequested && session == null
+        }
+        if (shouldResume) {
+            onSessionSlotAvailable?.invoke() ?: resume()
+        }
+    }
+
+    /**
+     * Atomically removes every route by which the Session could be used again. Native pause/close
+     * are intentionally deferred to [executeReleasePlan], outside [lock].
+     */
+    private fun detachOwnedSessionLocked(
+        finalState: SessionLifecycleState,
+        primaryError: Pair<SessionOperation, Throwable>? = null,
+        pauseBeforeClose: Boolean = sessionResumed,
+    ): ReleasePlan? {
+        val ownedSession = session ?: return null
+        val wasResumed = pauseBeforeClose && sessionResumed
+        updateEligible = false
+        sessionResumed = false
+        session = null
+        invalidateSurfaceUseLocked()
+        clearCurrentObservationLocked()
+        setLifecycleLocked(SessionLifecycleState.Closing)
+        return ReleasePlan(
+            session = ownedSession,
+            pauseBeforeClose = wasResumed,
+            finalState = finalState,
+            primaryError = primaryError,
+        )
+    }
+
+    private fun executeReleasePlan(plan: ReleasePlan) {
+        var pauseError: Throwable? = null
+        if (plan.pauseBeforeClose) {
+            try {
+                plan.session.pause()
+            } catch (error: Throwable) {
+                pauseError = error
+            }
+        }
+
+        val effectivePrimary = plan.primaryError ?: pauseError?.let { SessionOperation.PAUSE to it }
+        sessionCloseScheduler.scheduleClose(plan.session) { closeError ->
+            synchronized(lock) {
+                when {
+                    effectivePrimary != null -> setErrorLocked(
+                        effectivePrimary.first,
+                        effectivePrimary.second,
+                    )
+                    closeError != null -> setErrorLocked(SessionOperation.CLOSE, closeError)
+                    else -> setLifecycleLocked(plan.finalState)
+                }
+            }
+        }
+    }
+
+    private fun canUpdateLocked(): Boolean =
         !terminallyClosed &&
+            updateEligible &&
             sessionResumed &&
             lifecycleState == SessionLifecycleState.Running &&
             surfaceReady &&
@@ -216,7 +341,7 @@ class ArDiagnosticSessionController(
             viewportWidth > 0 &&
             viewportHeight > 0
 
-    private fun publishObservationIfDue(observation: DiagnosticObservation) {
+    private fun publishObservationIfDueLocked(observation: DiagnosticObservation) {
         val now = clockNanos()
         val stateChanged = lastPublishedObservation?.let {
             it.trackingState != observation.trackingState ||
@@ -233,45 +358,49 @@ class ArDiagnosticSessionController(
         }
     }
 
-    private fun setLifecycle(state: SessionLifecycleState) {
+    private fun stopUpdatesForRuntimeFailureLocked(
+        operation: SessionOperation,
+        error: Throwable,
+    ): Pair<SessionOperation, Throwable> {
+        updateEligible = false
+        clearCurrentObservationLocked()
+        setErrorLocked(operation, error)
+        return operation to error
+    }
+
+    private fun invalidateSurfaceUseLocked() {
+        surfaceReady = false
+        cameraTextureId = 0
+        configuredTextureId = 0
+        viewportWidth = 0
+        viewportHeight = 0
+        displayGeometryDirty = true
+    }
+
+    private fun clearCurrentObservationLocked() {
+        lastObservation = null
+        lastPublishedObservation = null
+        lastPublishedAtNanos = Long.MIN_VALUE
+    }
+
+    private fun setLifecycleLocked(state: SessionLifecycleState) {
         if (lifecycleState == state) return
         lifecycleState = state
         publish(state, lastObservation)
     }
 
-    private fun setError(operation: SessionOperation, error: Throwable) {
+    private fun setErrorLocked(operation: SessionOperation, error: Throwable) {
+        lifecycleState = errorState(operation, error)
+        publish(lifecycleState, null)
+    }
+
+    private fun errorState(operation: SessionOperation, error: Throwable): SessionLifecycleState.Error {
         val runtimeError = error as? ArRuntimeException
-        lifecycleState = SessionLifecycleState.Error(
+        return SessionLifecycleState.Error(
             operation = operation,
             failure = runtimeError?.failure ?: SessionFailure.UNEXPECTED_RUNTIME_ERROR,
             detail = error.message?.take(160),
         )
-        publish(lifecycleState, null)
-    }
-
-    private fun stopAfterFrameError(operation: SessionOperation, error: Throwable) {
-        val ownedSession = session
-        var pauseFailed = false
-        if (sessionResumed) {
-            try {
-                ownedSession?.pause()
-            } catch (_: Throwable) {
-                pauseFailed = true
-            }
-        }
-        sessionResumed = false
-        if (pauseFailed) {
-            session = null
-            configuredTextureId = 0
-            try {
-                ownedSession?.close()
-            } catch (_: Throwable) {
-                // Preserve the original frame-stage failure as the visible diagnostic.
-            }
-        }
-        lastObservation = null
-        lastPublishedObservation = null
-        setError(operation, error)
     }
 
     private fun publish(
@@ -316,6 +445,18 @@ class DiagnosticLifecycleCoordinator(
         sessionController.pause()
     }
 
+    /** Called on main after the render thread has atomically stopped further Session use. */
+    @Synchronized
+    fun onRuntimeFailure(operation: SessionOperation, error: Throwable) {
+        pauseSurfaceIfNeeded()
+        sessionController.releaseAfterRuntimeFailure(operation, error)
+    }
+
+    @Synchronized
+    fun onSessionSlotAvailable() {
+        resumeRuntimeIfReady()
+    }
+
     @Synchronized
     fun close() {
         activityResumed = false
@@ -325,10 +466,11 @@ class DiagnosticLifecycleCoordinator(
 
     private fun resumeRuntimeIfReady() {
         if (!activityResumed || !prerequisitesReady) return
-        // ARCore's sample lifecycle resumes Session before GLSurfaceView. This prevents the render
-        // thread from issuing update() against a paused Session.
         sessionController.resume()
-        if (!surfaceResumed && sessionController.currentLifecycleState() == SessionLifecycleState.Running) {
+        if (
+            !surfaceResumed &&
+            sessionController.currentLifecycleState() == SessionLifecycleState.Running
+        ) {
             surfacePort.resumeSurface()
             surfaceResumed = true
         }

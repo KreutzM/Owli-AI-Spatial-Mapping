@@ -3,29 +3,37 @@
 ## Required layers
 
 - **JVM:** geometry, depth projection, indexing, confidence semantics, voxel/map logic.
-- **Android unit:** diagnostic conversion, installation and permission states, ARCore error mappings, session ownership/lifecycle, GL prerequisites, failure handling, UI publication limits, and text/state mappings.
+- **Android unit:** diagnostic conversion, installation and permission states, ARCore error mappings, session ownership/lifecycle, asynchronous close gating, GL prerequisites, failure handling, UI publication limits, and text/state mappings.
 - **Generic AVD:** app launch, accessibility-visible diagnostic cards, permission action, lifecycle/relaunch behavior, and the unsupported/unavailable AR path.
 - **ARCore emulator spike:** session and virtual-scene tracking only after a dedicated issue.
 - **Galaxy S23+:** real ARCore tracking, pose, native image intrinsics, lifecycle, rotation, and camera-indicator validation for Issue #8; later Depth or mapping claims require their own issue and evidence.
 
 ## Issue #8 deterministic coverage
 
-The app unit suite uses fake installation and session ports. It verifies:
+The app unit suite uses fake installation/session ports and injected close executors. It verifies:
 
 - exactly one owned Session across repeated resume-style events;
 - no creation or resume without installed ARCore and camera permission;
 - a user-initiated install request with one non-looping resume follow-up;
+- restoration of the pending install attempt across controller/Activity recreation;
 - explicit installation and Session error mappings;
-- exact create/resume/surface/pause/close ordering, including GL-first prerequisite loss;
-- idempotent pause and close and no updates while paused;
+- exact create/resume/surface/pause/release ordering, including GL-first prerequisite loss;
+- synchronous update revocation and ownership detachment before asynchronous native close;
+- native close runs on a worker thread rather than the lifecycle caller;
+- no second Session is created while a prior Session is owned or closing;
+- close is queued exactly once and ordinary pause/terminal close remain idempotent;
+- no updates after pause, runtime error, detachment, or close request;
+- render-thread failures delegate surface pause and Session pause to the lifecycle path;
 - valid texture and positive viewport requirements;
-- update failures becoming visible diagnostic errors;
 - tracking-state and failure-reason mappings;
 - removal of current pose and intrinsics for `PAUSED` and `STOPPED`;
 - exact `(x, y, z, w)` to `(w, x, y, z)` quaternion conversion and unchanged metric translation;
 - rejection of non-finite or invalid native image intrinsics;
 - at most eight regular diagnostic publications per second plus immediate state changes;
-- single-slot UI backpressure and permission actions that match the current state.
+- single-slot UI backpressure;
+- launched/in-flight versus completed permission outcomes;
+- permanent denial only after a completed denied result with no rationale;
+- interrupted requests and revocation/one-time expiration/auto-reset after grant remain requestable.
 
 Run the required local checks from the repository root:
 

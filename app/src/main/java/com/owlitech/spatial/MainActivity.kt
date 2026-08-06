@@ -9,8 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.getValue
@@ -27,14 +27,18 @@ import com.owlitech.spatial.ar.ArCoreDiagnosticSessionFactory
 import com.owlitech.spatial.ar.ArCoreInstallAdapter
 import com.owlitech.spatial.ar.ArDiagnosticSessionController
 import com.owlitech.spatial.ar.ArDiagnosticState
+import com.owlitech.spatial.ar.ArInstallAttemptState
 import com.owlitech.spatial.ar.ArInstallController
 import com.owlitech.spatial.ar.CameraPermissionAction
+import com.owlitech.spatial.ar.CameraPermissionRequestOutcome
+import com.owlitech.spatial.ar.CameraPermissionRequestRecord
+import com.owlitech.spatial.ar.CameraPermissionTracker
 import com.owlitech.spatial.ar.DiagnosticGlSurfaceView
 import com.owlitech.spatial.ar.DiagnosticLifecycleCoordinator
 import com.owlitech.spatial.ar.DiagnosticObservation
 import com.owlitech.spatial.ar.LatestValueDispatcher
+import com.owlitech.spatial.ar.ProcessDiagnosticSessionCloseScheduler
 import com.owlitech.spatial.ar.SessionLifecycleState
-import com.owlitech.spatial.ar.cameraPermissionState
 import com.owlitech.spatial.ar.sessionPrerequisitesSatisfied
 import com.owlitech.spatial.ui.BootstrapScreen
 import com.owlitech.spatial.ui.DiagnosticTestTags
@@ -58,26 +62,51 @@ class MainActivity : ComponentActivity() {
     private var diagnosticState by mutableStateOf(ArDiagnosticState())
     private lateinit var capabilityProbe: ArCoreCapabilityProbe
     private lateinit var installController: ArInstallController
+    private lateinit var permissionTracker: CameraPermissionTracker
     private lateinit var sessionController: ArDiagnosticSessionController
     private lateinit var diagnosticSurfaceView: DiagnosticGlSurfaceView
     private lateinit var lifecycleCoordinator: DiagnosticLifecycleCoordinator
     private lateinit var sessionUpdateDispatcher: LatestValueDispatcher<SessionUpdate>
 
     private val permissionPreferences by lazy {
-        getSharedPreferences("camera_permission_state", MODE_PRIVATE)
+        getSharedPreferences(PERMISSION_PREFERENCES, MODE_PRIVATE)
     }
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) {
+    ) { granted ->
+        permissionTracker.onRequestResult(granted)
+        persistCompletedPermissionOutcome(permissionTracker.snapshot().lastCompletedOutcome)
         refreshCameraPermissionState()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val restoredInstallAttempt = ArInstallAttemptState(
+            awaitingReturnFromInstallUi = savedInstanceState?.getBoolean(
+                STATE_INSTALL_ATTEMPT_PENDING,
+                false,
+            ) == true,
+        )
+        diagnosticState = ArDiagnosticState(
+            capability = if (restoredInstallAttempt.awaitingReturnFromInstallUi) {
+                ArCapability.InstallationRequested
+            } else {
+                ArCapability.Checking
+            },
+        )
+
         capabilityProbe = ArCoreCapabilityProbe(applicationContext)
-        installController = ArInstallController(ArCoreInstallAdapter(this))
+        installController = ArInstallController(
+            installPort = ArCoreInstallAdapter(this),
+            initialState = restoredInstallAttempt,
+        )
+        permissionTracker = CameraPermissionTracker(
+            CameraPermissionRequestRecord(
+                lastCompletedOutcome = restoredCompletedPermissionOutcome(),
+            ),
+        )
         sessionUpdateDispatcher = LatestValueDispatcher(
             post = { block -> mainHandler.post(block) },
             consume = { update ->
@@ -91,14 +120,27 @@ class MainActivity : ComponentActivity() {
         )
         sessionController = ArDiagnosticSessionController(
             sessionFactory = ArCoreDiagnosticSessionFactory(applicationContext),
+            sessionCloseScheduler = ProcessDiagnosticSessionCloseScheduler,
+            onRuntimeReleaseRequested = { operation, error ->
+                mainHandler.post {
+                    if (!destroyed) {
+                        lifecycleCoordinator.onRuntimeFailure(operation, error)
+                    }
+                }
+            },
+            onSessionSlotAvailable = {
+                mainHandler.post {
+                    if (!destroyed) lifecycleCoordinator.onSessionSlotAvailable()
+                }
+            },
             onStateChanged = { lifecycle, observation ->
                 sessionUpdateDispatcher.offer(SessionUpdate(lifecycle, observation))
             },
         )
         diagnosticSurfaceView = DiagnosticGlSurfaceView(this).also {
             it.attachController(sessionController)
-            // GLSurfaceView starts its render thread when a renderer is attached. Keep it paused
-            // until the coordinator has successfully resumed an eligible ARCore Session.
+            // A renderer starts a GL thread immediately. Keep it paused until Session.resume()
+            // succeeds; the coordinator also pauses it before every Session pause/release.
             it.pauseSurface()
         }
         lifecycleCoordinator = DiagnosticLifecycleCoordinator(
@@ -126,7 +168,9 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
-        checkCapability()
+        if (!restoredInstallAttempt.awaitingReturnFromInstallUi) {
+            checkCapability()
+        }
     }
 
     override fun onResume() {
@@ -145,8 +189,18 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(
+            STATE_INSTALL_ATTEMPT_PENDING,
+            installController.snapshot().awaitingReturnFromInstallUi,
+        )
+        super.onSaveInstanceState(outState)
+    }
+
     override fun onDestroy() {
         destroyed = true
+        // This only revokes ownership, pauses if needed, and schedules native close. It never waits
+        // for Session.close(), and the process-wide close worker outlives this Activity instance.
         lifecycleCoordinator.close()
         capabilityExecutor.shutdownNow()
         super.onDestroy()
@@ -188,7 +242,8 @@ class MainActivity : ComponentActivity() {
             CameraPermissionAction.REQUEST,
             CameraPermissionAction.RETRY,
             -> {
-                permissionPreferences.edit().putBoolean(KEY_CAMERA_PERMISSION_REQUESTED, true).apply()
+                permissionTracker.onRequestLaunched()
+                refreshCameraPermissionState()
                 cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
             }
             CameraPermissionAction.OPEN_APPLICATION_SETTINGS -> {
@@ -204,15 +259,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshCameraPermissionState() {
-        val state = cameraPermissionState(
-            granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA,
-            ) == PackageManager.PERMISSION_GRANTED,
-            requestWasMade = permissionPreferences.getBoolean(
-                KEY_CAMERA_PERMISSION_REQUESTED,
-                false,
-            ),
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            permissionTracker.observeGrantedPermission()
+            persistCompletedPermissionOutcome(CameraPermissionRequestOutcome.GRANTED)
+        }
+        val state = permissionTracker.currentState(
+            granted = granted,
             shouldShowRequestPermissionRationale = shouldShowRequestPermissionRationale(
                 Manifest.permission.CAMERA,
             ),
@@ -221,6 +277,18 @@ class MainActivity : ComponentActivity() {
             diagnosticState = diagnosticState.copy(cameraPermission = state)
         }
         updateSessionPrerequisites()
+    }
+
+    private fun restoredCompletedPermissionOutcome(): CameraPermissionRequestOutcome {
+        val stored = permissionPreferences.getString(KEY_PERMISSION_COMPLETED_OUTCOME, null)
+        return CameraPermissionRequestOutcome.entries.firstOrNull { it.name == stored }
+            ?: CameraPermissionRequestOutcome.NONE
+    }
+
+    private fun persistCompletedPermissionOutcome(outcome: CameraPermissionRequestOutcome) {
+        permissionPreferences.edit()
+            .putString(KEY_PERMISSION_COMPLETED_OUTCOME, outcome.name)
+            .apply()
     }
 
     private fun setCapability(capability: ArCapability) {
@@ -240,6 +308,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val KEY_CAMERA_PERMISSION_REQUESTED = "camera_permission_requested"
+        const val PERMISSION_PREFERENCES = "camera_permission_state"
+        const val KEY_PERMISSION_COMPLETED_OUTCOME = "camera_permission_completed_outcome"
+        const val STATE_INSTALL_ATTEMPT_PENDING = "arcore_install_attempt_pending"
     }
 }

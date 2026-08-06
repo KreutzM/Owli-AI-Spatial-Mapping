@@ -1,16 +1,17 @@
 package com.owlitech.spatial.ar
 
+import java.util.concurrent.Executor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ArDiagnosticSessionControllerTest {
     @Test
     fun multipleResumeAndUiEventsCreateExactlyOneSession() {
-        val events = mutableListOf<String>()
-        val factory = FakeFactory(events)
-        val controller = controller(factory)
+        val fixture = Fixture()
+        val controller = fixture.controller()
 
         controller.setPrerequisitesReady(true)
         controller.resume()
@@ -18,38 +19,29 @@ class ArDiagnosticSessionControllerTest {
         controller.setPrerequisitesReady(true)
         controller.resume()
 
-        assertEquals(1, factory.created)
-        assertEquals(1, factory.session.resumeCalls)
+        assertEquals(1, fixture.factory.created)
+        assertEquals(1, fixture.factory.sessions.single().resumeCalls)
         assertTrue(controller.hasOwnedSession())
     }
 
     @Test
     fun missingPrerequisitesNeverCreateOrResumeSession() {
-        val factory = FakeFactory(mutableListOf())
-        val controller = controller(factory)
+        val fixture = Fixture()
+        val controller = fixture.controller()
 
         controller.resume()
         controller.onSurfaceCreated(7)
         controller.onSurfaceChanged(0, 100, 200)
         controller.updateFrame()
 
-        assertEquals(0, factory.created)
-        assertEquals(0, factory.session.resumeCalls)
-        assertEquals(0, factory.session.updateCalls)
+        assertEquals(0, fixture.factory.created)
     }
 
     @Test
-    fun lifecycleOrderingIsDeterministicAndResumeReusesSession() {
-        val events = mutableListOf<String>()
-        val factory = FakeFactory(events)
-        val controller = controller(factory)
-        val coordinator = DiagnosticLifecycleCoordinator(
-            controller,
-            object : DiagnosticSurfacePort {
-                override fun resumeSurface() { events += "surface.resume" }
-                override fun pauseSurface() { events += "surface.pause" }
-            },
-        )
+    fun lifecycleOrderingRetainsSessionAcrossPauseAndQueuesCloseAfterFinalPause() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
+        val coordinator = fixture.coordinator(controller)
 
         coordinator.onPrerequisitesChanged(true)
         coordinator.onActivityResume()
@@ -59,107 +51,312 @@ class ArDiagnosticSessionControllerTest {
 
         assertEquals(
             listOf(
-                "session.create",
-                "session.resume",
+                "session.create.1",
+                "session.resume.1",
                 "surface.resume",
                 "surface.pause",
-                "session.pause",
-                "session.resume",
+                "session.pause.1",
+                "session.resume.1",
                 "surface.resume",
                 "surface.pause",
-                "session.pause",
-                "session.close",
+                "session.pause.1",
             ),
-            events,
+            fixture.events,
         )
-        assertEquals(1, factory.created)
+        assertEquals(0, fixture.factory.sessions.single().closeCalls)
+        assertEquals(SessionLifecycleState.Closing, controller.currentLifecycleState())
+
+        fixture.closeTasks.runNext()
+
+        assertEquals("session.close.1", fixture.events.last())
+        assertEquals(1, fixture.factory.created)
+        assertEquals(SessionLifecycleState.Closed, controller.currentLifecycleState())
     }
 
     @Test
-    fun prerequisiteLossPausesSurfaceBeforePausingAndClosingSession() {
-        val events = mutableListOf<String>()
-        val factory = FakeFactory(events)
-        val controller = controller(factory)
-        val coordinator = DiagnosticLifecycleCoordinator(
-            controller,
-            object : DiagnosticSurfacePort {
-                override fun resumeSurface() { events += "surface.resume" }
-                override fun pauseSurface() { events += "surface.pause" }
-            },
-        )
+    fun prerequisiteLossPausesSurfaceAndSessionBeforeAsyncClose() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
+        val coordinator = fixture.coordinator(controller)
         coordinator.onPrerequisitesChanged(true)
         coordinator.onActivityResume()
-        events.clear()
+        fixture.events.clear()
 
         coordinator.onPrerequisitesChanged(false)
 
-        assertEquals(
-            listOf("surface.pause", "session.pause", "session.close"),
-            events,
-        )
+        assertEquals(listOf("surface.pause", "session.pause.1"), fixture.events)
         assertFalse(controller.hasOwnedSession())
+        assertEquals(0, fixture.factory.sessions.single().closeCalls)
+        assertEquals(SessionLifecycleState.Closing, controller.currentLifecycleState())
+
+        fixture.closeTasks.runNext()
+        assertEquals(listOf("surface.pause", "session.pause.1", "session.close.1"), fixture.events)
+        assertEquals(
+            SessionLifecycleState.WaitingForPrerequisites,
+            controller.currentLifecycleState(),
+        )
     }
 
     @Test
-    fun failedSessionResumeDoesNotStartSurfaceLoop() {
+    fun terminalCloseDetachesSynchronouslyAndIsIdempotent() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
+        controller.setPrerequisitesReady(true)
+        controller.resume()
+        controller.onSurfaceCreated(5)
+        controller.onSurfaceChanged(0, 100, 100)
+        controller.updateFrame()
+        assertEquals(1, fixture.factory.sessions.single().updateCalls)
+
+        controller.close()
+        controller.close()
+        controller.updateFrame()
+
+        val session = fixture.factory.sessions.single()
+        assertFalse(controller.hasOwnedSession())
+        assertEquals(1, session.pauseCalls)
+        assertEquals(1, session.updateCalls)
+        assertEquals(0, session.closeCalls)
+        assertEquals(1, fixture.closeTasks.tasks.size)
+
+        fixture.closeTasks.runNext()
+        assertEquals(1, session.closeCalls)
+        assertEquals(SessionLifecycleState.Closed, controller.currentLifecycleState())
+    }
+
+    @Test
+    fun previousCloseBlocksNewControllerAndSessionUntilCompletion() {
+        val closeTasks = QueueExecutor()
+        val scheduler = BoundedDiagnosticSessionCloseScheduler(closeTasks, DirectExecutor)
+        val firstFactory = FakeFactory(mutableListOf(), "old")
+        val secondFactory = FakeFactory(mutableListOf(), "new")
+        val first = controller(firstFactory, scheduler)
+        val second = controller(secondFactory, scheduler)
+
+        first.setPrerequisitesReady(true)
+        first.resume()
+        first.close()
+
+        second.setPrerequisitesReady(true)
+        second.resume()
+
+        assertEquals(0, secondFactory.created)
+        assertEquals(SessionLifecycleState.Closing, second.currentLifecycleState())
+        assertEquals(DiagnosticSessionSlotState.CLOSING, scheduler.currentSlotState())
+
+        closeTasks.runNext()
+
+        assertEquals(1, secondFactory.created)
+        assertEquals(1, secondFactory.sessions.single().resumeCalls)
+        assertEquals(SessionLifecycleState.Running, second.currentLifecycleState())
+    }
+
+    @Test
+    fun recreatedCoordinatorResumesSurfaceAfterPreviousCloseCompletes() {
+        val closeTasks = QueueExecutor()
+        val scheduler = BoundedDiagnosticSessionCloseScheduler(closeTasks, DirectExecutor)
+        val oldFactory = FakeFactory(mutableListOf(), "old")
+        val oldController = controller(oldFactory, scheduler)
+        oldController.setPrerequisitesReady(true)
+        oldController.resume()
+        oldController.close()
+
         val events = mutableListOf<String>()
-        val factory = FakeFactory(events).also {
-            it.session.resumeError = ArRuntimeException(
-                SessionFailure.CAMERA_NOT_AVAILABLE,
-                "resume",
-            )
-        }
-        val controller = controller(factory)
-        val coordinator = DiagnosticLifecycleCoordinator(
-            controller,
+        val newFactory = FakeFactory(events, "new")
+        lateinit var coordinator: DiagnosticLifecycleCoordinator
+        val newController = ArDiagnosticSessionController(
+            sessionFactory = newFactory,
+            sessionCloseScheduler = scheduler,
+            onSessionSlotAvailable = { coordinator.onSessionSlotAvailable() },
+            onStateChanged = { _, _ -> },
+        )
+        coordinator = DiagnosticLifecycleCoordinator(
+            newController,
             object : DiagnosticSurfacePort {
-                override fun resumeSurface() { events += "surface.resume" }
-                override fun pauseSurface() { events += "surface.pause" }
+                override fun resumeSurface() {
+                    events += "surface.resume"
+                }
+
+                override fun pauseSurface() {
+                    events += "surface.pause"
+                }
             },
         )
-
         coordinator.onPrerequisitesChanged(true)
         coordinator.onActivityResume()
+        assertEquals(0, newFactory.created)
 
-        assertEquals(listOf("session.create", "session.resume"), events)
+        closeTasks.runNext()
+
+        assertEquals(
+            listOf("session.create.new", "session.resume.new", "surface.resume"),
+            events,
+        )
+        assertEquals(SessionLifecycleState.Running, newController.currentLifecycleState())
+    }
+
+    @Test
+    fun oldActivityOwnershipAlsoBlocksRecreatedActivityBeforeCloseStarts() {
+        val closeTasks = QueueExecutor()
+        val scheduler = BoundedDiagnosticSessionCloseScheduler(closeTasks, DirectExecutor)
+        val firstFactory = FakeFactory(mutableListOf(), "old")
+        val secondFactory = FakeFactory(mutableListOf(), "new")
+        val first = controller(firstFactory, scheduler)
+        val second = controller(secondFactory, scheduler)
+
+        first.setPrerequisitesReady(true)
+        first.resume()
+        first.pause()
+
+        second.setPrerequisitesReady(true)
+        second.resume()
+        assertEquals(0, secondFactory.created)
+        assertEquals(SessionLifecycleState.WaitingForPreviousSession, second.currentLifecycleState())
+
+        first.close()
+        assertEquals(0, secondFactory.created)
+        closeTasks.runNext()
+        assertEquals(1, secondFactory.created)
+    }
+
+    @Test
+    fun frameFailureRevokesUpdatesBeforeMainThreadReleaseAndClose() {
+        val fixture = Fixture()
+        var requestedFailure: Pair<SessionOperation, Throwable>? = null
+        val controller = fixture.controller(
+            onRuntimeReleaseRequested = { operation, error ->
+                requestedFailure = operation to error
+            },
+        )
+        val coordinator = fixture.coordinator(controller)
+        coordinator.onPrerequisitesChanged(true)
+        coordinator.onActivityResume()
+        controller.onSurfaceCreated(5)
+        controller.onSurfaceChanged(0, 100, 100)
+        fixture.factory.sessions.single().updateError = ArRuntimeException(
+            SessionFailure.CAMERA_NOT_AVAILABLE,
+            "camera",
+        )
+
+        controller.updateFrame()
+        controller.updateFrame()
+
+        val session = fixture.factory.sessions.single()
+        assertEquals(1, session.updateCalls)
+        assertTrue(controller.hasOwnedSession())
+        assertEquals(SessionOperation.UPDATE, requestedFailure?.first)
         assertEquals(
             SessionLifecycleState.Error(
-                SessionOperation.RESUME,
+                SessionOperation.UPDATE,
                 SessionFailure.CAMERA_NOT_AVAILABLE,
-                "resume",
+                "camera",
+            ),
+            controller.currentLifecycleState(),
+        )
+
+        val failure = requireNotNull(requestedFailure)
+        coordinator.onRuntimeFailure(failure.first, failure.second)
+
+        assertFalse(controller.hasOwnedSession())
+        assertEquals(1, session.pauseCalls)
+        assertEquals(0, session.closeCalls)
+        assertEquals("surface.pause", fixture.events[fixture.events.size - 2])
+        assertEquals("session.pause.1", fixture.events.last())
+
+        fixture.closeTasks.runNext()
+        assertEquals(1, session.closeCalls)
+        assertEquals(
+            SessionLifecycleState.Error(
+                SessionOperation.UPDATE,
+                SessionFailure.CAMERA_NOT_AVAILABLE,
+                "camera",
             ),
             controller.currentLifecycleState(),
         )
     }
 
     @Test
-    fun pauseAndCloseAreIdempotentAndFramesStopWhilePaused() {
-        val factory = FakeFactory(mutableListOf())
-        val controller = controller(factory)
+    fun pauseFailureDetachesAndSchedulesOneCloseWithoutClosingInline() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
         controller.setPrerequisitesReady(true)
         controller.resume()
-        controller.onSurfaceCreated(11)
-        controller.onSurfaceChanged(1, 640, 480)
-        controller.updateFrame()
-        assertEquals(1, factory.session.updateCalls)
+        val session = fixture.factory.sessions.single().also {
+            it.pauseError = ArRuntimeException(SessionFailure.SESSION_NOT_PAUSED, "pause")
+        }
 
         controller.pause()
         controller.pause()
-        controller.updateFrame()
-        assertEquals(1, factory.session.pauseCalls)
-        assertEquals(1, factory.session.updateCalls)
+
+        assertEquals(1, session.pauseCalls)
+        assertEquals(0, session.closeCalls)
+        assertFalse(controller.hasOwnedSession())
+        assertEquals(1, fixture.closeTasks.tasks.size)
+
+        fixture.closeTasks.runNext()
+        assertEquals(1, session.closeCalls)
+        assertEquals(
+            SessionLifecycleState.Error(
+                SessionOperation.PAUSE,
+                SessionFailure.SESSION_NOT_PAUSED,
+                "pause",
+            ),
+            controller.currentLifecycleState(),
+        )
+    }
+
+    @Test
+    fun closeFailureIsReportedAfterBackgroundTask() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
+        controller.setPrerequisitesReady(true)
+        controller.resume()
+        fixture.factory.sessions.single().closeError = ArRuntimeException(
+            SessionFailure.UNEXPECTED_RUNTIME_ERROR,
+            "close",
+        )
 
         controller.close()
-        controller.close()
-        assertEquals(1, factory.session.closeCalls)
+        assertEquals(SessionLifecycleState.Closing, controller.currentLifecycleState())
+        fixture.closeTasks.runNext()
+
+        assertEquals(
+            SessionLifecycleState.Error(
+                SessionOperation.CLOSE,
+                SessionFailure.UNEXPECTED_RUNTIME_ERROR,
+                "close",
+            ),
+            controller.currentLifecycleState(),
+        )
+    }
+
+    @Test
+    fun creationFailureReleasesGlobalSlotForAnotherController() {
+        val closeTasks = QueueExecutor()
+        val scheduler = BoundedDiagnosticSessionCloseScheduler(closeTasks, DirectExecutor)
+        val failingFactory = DiagnosticSessionFactory {
+            throw ArRuntimeException(SessionFailure.ARCORE_APK_MISSING, "missing")
+        }
+        val first = controller(failingFactory, scheduler)
+        first.setPrerequisitesReady(true)
+        first.resume()
+
+        assertEquals(DiagnosticSessionSlotState.AVAILABLE, scheduler.currentSlotState())
+
+        val secondFactory = FakeFactory(mutableListOf(), "second")
+        val second = controller(secondFactory, scheduler)
+        second.setPrerequisitesReady(true)
+        second.resume()
+        assertEquals(1, secondFactory.created)
     }
 
     @Test
     fun updateRequiresValidSurfaceTextureAndGeometry() {
-        val factory = FakeFactory(mutableListOf())
-        val controller = controller(factory)
+        val fixture = Fixture()
+        val controller = fixture.controller()
         controller.setPrerequisitesReady(true)
         controller.resume()
+        val session = fixture.factory.sessions.single()
 
         controller.updateFrame()
         controller.onSurfaceCreated(0)
@@ -168,223 +365,120 @@ class ArDiagnosticSessionControllerTest {
         controller.onSurfaceCreated(5)
         controller.onSurfaceChanged(0, 0, 480)
         controller.updateFrame()
-        assertEquals(0, factory.session.updateCalls)
+        assertEquals(0, session.updateCalls)
 
         controller.onSurfaceChanged(2, 640, 480)
         controller.updateFrame()
-        assertEquals(1, factory.session.textureCalls)
-        assertEquals(1, factory.session.geometryCalls)
-        assertEquals(1, factory.session.updateCalls)
-        assertEquals(listOf("texture", "geometry", "update"), factory.session.frameEvents)
+        assertEquals(1, session.textureCalls)
+        assertEquals(1, session.geometryCalls)
+        assertEquals(1, session.updateCalls)
+        assertEquals(listOf("texture", "geometry", "update"), session.frameEvents)
     }
 
     @Test
-    fun updateFailureBecomesVisibleAndStopsFurtherUpdates() {
-        val published = mutableListOf<SessionLifecycleState>()
-        val factory = FakeFactory(mutableListOf()).also {
-            it.session.updateError = ArRuntimeException(SessionFailure.CAMERA_NOT_AVAILABLE, "camera")
-        }
-        val controller = ArDiagnosticSessionController(
-            sessionFactory = factory,
-            onStateChanged = { state, _ -> published += state },
-        )
-        controller.setPrerequisitesReady(true)
-        controller.resume()
-        controller.onSurfaceCreated(5)
-        controller.onSurfaceChanged(0, 100, 100)
-
-        controller.updateFrame()
-        controller.updateFrame()
-
-        assertEquals(1, factory.session.updateCalls)
-        assertEquals(
-            SessionLifecycleState.Error(
-                SessionOperation.UPDATE,
-                SessionFailure.CAMERA_NOT_AVAILABLE,
-                "camera",
-            ),
-            published.last(),
-        )
-    }
-
-
-    @Test
-    fun pauseFailureAttemptsTerminalReleaseAndDropsSessionOwnership() {
-        val published = mutableListOf<SessionLifecycleState>()
-        val factory = FakeFactory(mutableListOf()).also {
-            it.session.pauseError = ArRuntimeException(SessionFailure.SESSION_NOT_PAUSED, "pause")
-        }
-        val controller = ArDiagnosticSessionController(
-            sessionFactory = factory,
-            onStateChanged = { state, _ -> published += state },
-        )
-        controller.setPrerequisitesReady(true)
-        controller.resume()
-
-        controller.pause()
-        controller.pause()
-
-        assertEquals(1, factory.session.pauseCalls)
-        assertEquals(1, factory.session.closeCalls)
-        assertFalse(controller.hasOwnedSession())
-        assertEquals(
-            SessionLifecycleState.Error(
-                SessionOperation.PAUSE,
-                SessionFailure.SESSION_NOT_PAUSED,
-                "pause",
-            ),
-            published.last(),
-        )
-    }
-
-    @Test
-    fun textureAndDisplayGeometryFailuresUseTheirExactOperation() {
-        listOf(
-            SessionOperation.CAMERA_TEXTURE to { session: FakeSession ->
-                session.textureError = ArRuntimeException(
-                    SessionFailure.CAMERA_TEXTURE_NOT_SET,
-                    "texture",
-                )
-            },
-            SessionOperation.DISPLAY_GEOMETRY to { session: FakeSession ->
-                session.geometryError = ArRuntimeException(
-                    SessionFailure.MISSING_GL_CONTEXT,
-                    "geometry",
-                )
-            },
-        ).forEach { (operation, configure) ->
-            val published = mutableListOf<SessionLifecycleState>()
-            val factory = FakeFactory(mutableListOf())
-            configure(factory.session)
-            val controller = ArDiagnosticSessionController(
-                sessionFactory = factory,
-                onStateChanged = { state, _ -> published += state },
-            )
-            controller.setPrerequisitesReady(true)
-            controller.resume()
-            controller.onSurfaceCreated(5)
-            controller.onSurfaceChanged(0, 100, 100)
-
-            controller.updateFrame()
-
-            val error = published.last() as SessionLifecycleState.Error
-            assertEquals(operation, error.operation)
-            assertEquals(0, factory.session.updateCalls)
-        }
-    }
-
-    @Test
-    fun createResumePauseAndCloseFailuresUseTheirExactOperation() {
-        fun lastStateFor(
-            factory: DiagnosticSessionFactory,
-            exercise: (ArDiagnosticSessionController) -> Unit,
-        ): SessionLifecycleState {
-            val states = mutableListOf<SessionLifecycleState>()
-            val controller = ArDiagnosticSessionController(
-                sessionFactory = factory,
-                onStateChanged = { state, _ -> states += state },
-            )
-            controller.setPrerequisitesReady(true)
-            exercise(controller)
-            return states.last()
-        }
-
-        val createFailure = lastStateFor(
-            factory = DiagnosticSessionFactory {
-                throw ArRuntimeException(SessionFailure.ARCORE_APK_MISSING, "missing")
-            },
-            exercise = { it.resume() },
-        )
-        assertEquals(
-            SessionLifecycleState.Error(
-                SessionOperation.CREATE,
-                SessionFailure.ARCORE_APK_MISSING,
-                "missing",
-            ),
-            createFailure,
-        )
-
-        listOf(
-            SessionOperation.RESUME to { session: FakeSession ->
-                session.resumeError = ArRuntimeException(SessionFailure.CAMERA_NOT_AVAILABLE, "resume")
-            },
-            SessionOperation.PAUSE to { session: FakeSession ->
-                session.pauseError = ArRuntimeException(SessionFailure.SESSION_NOT_PAUSED, "pause")
-            },
-            SessionOperation.CLOSE to { session: FakeSession ->
-                session.closeError = ArRuntimeException(SessionFailure.UNEXPECTED_RUNTIME_ERROR, "close")
-            },
-        ).forEach { (operation, configure) ->
-            val factory = FakeFactory(mutableListOf())
-            configure(factory.session)
-            val state = lastStateFor(factory) { controller ->
-                controller.resume()
-                when (operation) {
-                    SessionOperation.RESUME -> Unit
-                    SessionOperation.PAUSE -> controller.pause()
-                    SessionOperation.CLOSE -> controller.close()
-                    else -> error("Unexpected operation")
-                }
-            }
-            val error = state as SessionLifecycleState.Error
-            assertEquals(operation, error.operation)
-        }
-    }
-
-    @Test
-    fun observationPublicationIsBoundedButStateChangesPublishImmediately() {
+    fun observationPublicationRemainsBoundedAndPauseClearsCurrentObservation() {
         var now = 0L
-        val observations = mutableListOf<DiagnosticObservation>()
-        val factory = FakeFactory(mutableListOf())
-        val controller = ArDiagnosticSessionController(
-            sessionFactory = factory,
+        val observations = mutableListOf<DiagnosticObservation?>()
+        val fixture = Fixture()
+        val controller = fixture.controller(
             clockNanos = { now },
             minimumPublishIntervalNanos = 125L,
-            onStateChanged = { _, observation -> observation?.let(observations::add) },
+            onStateChanged = { _, observation -> observations += observation },
         )
         controller.setPrerequisitesReady(true)
         controller.resume()
         controller.onSurfaceCreated(5)
         controller.onSurfaceChanged(0, 100, 100)
+        val session = fixture.factory.sessions.single()
 
         repeat(10) {
-            factory.session.nextTimestamp = it.toLong()
+            session.nextTimestamp = it.toLong()
             controller.updateFrame()
             now += 10L
         }
-        assertEquals(1, observations.size)
+        assertEquals(1, observations.filterNotNull().size)
 
         now = 130L
         controller.updateFrame()
-        assertEquals(2, observations.size)
+        assertEquals(2, observations.filterNotNull().size)
 
-        factory.session.trackingState = DiagnosticTrackingState.PAUSED
-        now = 131L
-        controller.updateFrame()
-        assertEquals(3, observations.size)
-        assertFalse(observations.last().worldFromArCoreCamera != null)
+        controller.pause()
+        assertNull(observations.last())
     }
 
-    private fun controller(factory: DiagnosticSessionFactory) = ArDiagnosticSessionController(
+    private class Fixture {
+        val events = mutableListOf<String>()
+        val closeTasks = QueueExecutor()
+        val scheduler = BoundedDiagnosticSessionCloseScheduler(closeTasks, DirectExecutor)
+        val factory = FakeFactory(events, "1")
+
+        fun controller(
+            clockNanos: () -> Long = System::nanoTime,
+            minimumPublishIntervalNanos: Long = 125_000_000L,
+            onRuntimeReleaseRequested: (SessionOperation, Throwable) -> Unit = { _, _ -> },
+            onStateChanged: (SessionLifecycleState, DiagnosticObservation?) -> Unit = { _, _ -> },
+        ) = ArDiagnosticSessionController(
+            sessionFactory = factory,
+            sessionCloseScheduler = scheduler,
+            clockNanos = clockNanos,
+            minimumPublishIntervalNanos = minimumPublishIntervalNanos,
+            onRuntimeReleaseRequested = onRuntimeReleaseRequested,
+            onStateChanged = onStateChanged,
+        )
+
+        fun coordinator(controller: ArDiagnosticSessionController) = DiagnosticLifecycleCoordinator(
+            controller,
+            object : DiagnosticSurfacePort {
+                override fun resumeSurface() {
+                    events += "surface.resume"
+                }
+
+                override fun pauseSurface() {
+                    events += "surface.pause"
+                }
+            },
+        )
+    }
+
+    private fun controller(
+        factory: DiagnosticSessionFactory,
+        scheduler: DiagnosticSessionCloseScheduler,
+    ) = ArDiagnosticSessionController(
         sessionFactory = factory,
+        sessionCloseScheduler = scheduler,
         onStateChanged = { _, _ -> },
     )
 
+    private object DirectExecutor : Executor {
+        override fun execute(command: Runnable) = command.run()
+    }
+
+    private class QueueExecutor : Executor {
+        val tasks = mutableListOf<Runnable>()
+        override fun execute(command: Runnable) {
+            tasks += command
+        }
+
+        fun runNext() = tasks.removeAt(0).run()
+    }
+
     private class FakeFactory(
         private val events: MutableList<String>,
+        private val label: String,
     ) : DiagnosticSessionFactory {
         var created = 0
-        val session = FakeSession(events)
+        val sessions = mutableListOf<FakeSession>()
 
         override fun create(): DiagnosticSessionPort {
             created += 1
-            events += "session.create"
-            return session
+            events += "session.create.$label"
+            return FakeSession(events, label).also(sessions::add)
         }
     }
 
     private class FakeSession(
         private val events: MutableList<String>,
+        private val label: String,
     ) : DiagnosticSessionPort {
         var resumeCalls = 0
         var pauseCalls = 0
@@ -404,7 +498,7 @@ class ArDiagnosticSessionControllerTest {
 
         override fun resume() {
             resumeCalls += 1
-            events += "session.resume"
+            events += "session.resume.$label"
             resumeError?.let { throw it }
         }
 
@@ -450,13 +544,13 @@ class ArDiagnosticSessionControllerTest {
 
         override fun pause() {
             pauseCalls += 1
-            events += "session.pause"
+            events += "session.pause.$label"
             pauseError?.let { throw it }
         }
 
         override fun close() {
             closeCalls += 1
-            events += "session.close"
+            events += "session.close.$label"
             closeError?.let { throw it }
         }
     }

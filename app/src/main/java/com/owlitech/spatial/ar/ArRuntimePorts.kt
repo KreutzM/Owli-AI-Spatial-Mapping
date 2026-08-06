@@ -24,6 +24,31 @@ interface DiagnosticSurfacePort {
     fun pauseSurface()
 }
 
+enum class DiagnosticSessionSlotState {
+    AVAILABLE,
+    OWNED,
+    CLOSING,
+}
+
+/**
+ * Process-wide ownership gate and asynchronous native-close boundary.
+ *
+ * Implementations must never invoke [DiagnosticSessionPort.close] inline. A successful slot
+ * acquisition remains owned until either [releaseSessionSlot] or [scheduleClose] is called.
+ * [notifyWhenAvailable] retains at most one latest waiter, preventing recreation/resume loops from
+ * building an unbounded callback queue.
+ */
+interface DiagnosticSessionCloseScheduler {
+    fun tryAcquireSessionSlot(): Boolean
+    fun releaseSessionSlot()
+    fun scheduleClose(
+        session: DiagnosticSessionPort,
+        onComplete: (Throwable?) -> Unit,
+    )
+    fun notifyWhenAvailable(callback: () -> Unit)
+    fun currentSlotState(): DiagnosticSessionSlotState
+}
+
 interface ArInstallPort {
     fun requestInstall(userRequestedInstall: Boolean): InstallRequestResult
 }

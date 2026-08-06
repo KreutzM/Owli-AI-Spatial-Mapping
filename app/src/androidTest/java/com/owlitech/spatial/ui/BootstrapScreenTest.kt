@@ -101,4 +101,72 @@ class BootstrapScreenTest {
             "Kameraberechtigung anfragen",
         ).assertExists()
     }
+
+    @Test
+    fun inFlightPermissionDoesNotOfferAnotherRuntimeDialog() {
+        composeRule.setContent {
+            OwliSpatialTheme {
+                BootstrapScreen(
+                    state = ArDiagnosticState(
+                        capability = ArCapability.Unsupported,
+                        cameraPermission = CameraPermissionState.REQUEST_IN_FLIGHT,
+                        sessionLifecycle = SessionLifecycleState.WaitingForPrerequisites,
+                    ),
+                    onCheckAgain = {},
+                    onInstallArCore = {},
+                    onPermissionAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(
+            "Berechtigungsanfrage läuft; Ergebnis steht noch aus",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(DiagnosticTestTags.PERMISSION_ACTION).assertDoesNotExist()
+    }
+
+    @Test
+    fun revokedPermissionIsExplicitlyRequestableInsteadOfPermanent() {
+        composeRule.setContent {
+            OwliSpatialTheme {
+                BootstrapScreen(
+                    state = ArDiagnosticState(
+                        capability = ArCapability.Unsupported,
+                        cameraPermission = CameraPermissionState.REVOKED_OR_RESET_REQUESTABLE,
+                        sessionLifecycle = SessionLifecycleState.WaitingForPrerequisites,
+                    ),
+                    onCheckAgain = {},
+                    onInstallArCore = {},
+                    onPermissionAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(
+            "Frühere Erteilung wurde entzogen oder zurückgesetzt; erneute Anfrage möglich",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Kameraberechtigung anfragen").assertExists()
+    }
+
+    @Test
+    fun closingStateIsVisibleWithoutClaimingSessionAlreadyClosed() {
+        composeRule.setContent {
+            OwliSpatialTheme {
+                BootstrapScreen(
+                    state = ArDiagnosticState(
+                        capability = ArCapability.SupportedInstalled,
+                        cameraPermission = CameraPermissionState.GRANTED,
+                        sessionLifecycle = SessionLifecycleState.Closing,
+                    ),
+                    onCheckAgain = {},
+                    onInstallArCore = {},
+                    onPermissionAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(
+            "Session-Verwendung beendet; native Freigabe läuft im Hintergrund",
+        ).assertIsDisplayed()
+    }
 }

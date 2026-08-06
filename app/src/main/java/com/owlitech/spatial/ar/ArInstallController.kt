@@ -1,35 +1,45 @@
 package com.owlitech.spatial.ar
 
+data class ArInstallAttemptState(
+    val awaitingReturnFromInstallUi: Boolean = false,
+)
+
 class ArInstallController(
     private val installPort: ArInstallPort,
+    initialState: ArInstallAttemptState = ArInstallAttemptState(),
 ) {
-    private var awaitingReturnFromInstallUi = false
+    private var state = initialState
 
     @Synchronized
     fun requestFromUser(): ArCapability {
-        if (awaitingReturnFromInstallUi) return ArCapability.InstallationRequested
+        if (state.awaitingReturnFromInstallUi) return ArCapability.InstallationRequested
         return request(userRequestedInstall = true)
     }
 
     /**
-     * Completes one pending install attempt after the Activity returns. This is deliberately called
-     * at most once for a user-initiated attempt, so Activity resume cannot create an install loop.
+     * Completes exactly one pending install attempt after the Activity returns. The pending bit is
+     * cleared before `requestInstall(..., false)` so repeated resume or recreation cannot loop it.
      */
     @Synchronized
     fun onActivityResumed(): ArCapability? {
-        if (!awaitingReturnFromInstallUi) return null
-        awaitingReturnFromInstallUi = false
+        if (!state.awaitingReturnFromInstallUi) return null
+        state = ArInstallAttemptState()
         return request(userRequestedInstall = false)
     }
 
     @Synchronized
-    fun hasPendingInstallAttempt(): Boolean = awaitingReturnFromInstallUi
+    fun snapshot(): ArInstallAttemptState = state
+
+    @Synchronized
+    fun hasPendingInstallAttempt(): Boolean = state.awaitingReturnFromInstallUi
 
     private fun request(userRequestedInstall: Boolean): ArCapability = try {
         when (installPort.requestInstall(userRequestedInstall)) {
             InstallRequestResult.INSTALLED -> ArCapability.SupportedInstalled
             InstallRequestResult.INSTALL_REQUESTED -> {
-                awaitingReturnFromInstallUi = userRequestedInstall
+                if (userRequestedInstall) {
+                    state = ArInstallAttemptState(awaitingReturnFromInstallUi = true)
+                }
                 ArCapability.InstallationRequested
             }
         }

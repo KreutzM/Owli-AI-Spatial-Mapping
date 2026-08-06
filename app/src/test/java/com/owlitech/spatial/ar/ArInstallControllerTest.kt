@@ -30,6 +30,45 @@ class ArInstallControllerTest {
     }
 
     @Test
+    fun pendingAttemptSurvivesControllerRecreationAndRunsOneFalseFollowUp() {
+        val port = FakeInstallPort(
+            mutableListOf(
+                InstallRequestResult.INSTALL_REQUESTED,
+                InstallRequestResult.INSTALLED,
+            ),
+        )
+        val firstController = ArInstallController(port)
+        assertEquals(ArCapability.InstallationRequested, firstController.requestFromUser())
+
+        val recreatedController = ArInstallController(
+            installPort = port,
+            initialState = firstController.snapshot(),
+        )
+        assertTrue(recreatedController.hasPendingInstallAttempt())
+        assertEquals(ArCapability.SupportedInstalled, recreatedController.onActivityResumed())
+        assertNull(recreatedController.onActivityResumed())
+        assertEquals(listOf(true, false), port.requests)
+    }
+
+    @Test
+    fun falseFollowUpCannotRearmPendingAttemptOrLoop() {
+        val port = FakeInstallPort(
+            mutableListOf(
+                InstallRequestResult.INSTALL_REQUESTED,
+                InstallRequestResult.INSTALL_REQUESTED,
+            ),
+        )
+        val first = ArInstallController(port)
+        first.requestFromUser()
+        val recreated = ArInstallController(port, first.snapshot())
+
+        assertEquals(ArCapability.InstallationRequested, recreated.onActivityResumed())
+        assertFalse(recreated.hasPendingInstallAttempt())
+        assertNull(recreated.onActivityResumed())
+        assertEquals(listOf(true, false), port.requests)
+    }
+
+    @Test
     fun knownInstallFailuresMapToPreciseUnavailableStates() {
         ArUnavailableReason.entries.forEach { reason ->
             val controller = ArInstallController(
