@@ -14,7 +14,7 @@ Selects one exact ADB serial. The script never falls back to another device.
 Uses one explicit adb executable before all environment and PATH discovery locations.
 
 .PARAMETER NoBuild
-Skips Gradle only when the exact APK and its script-generated provenance sidecar match the current checkout.
+Skips Gradle only when the exact APK and its generated provenance sidecar match the current checkout.
 
 .PARAMETER NoLaunch
 Builds and installs without launching the application.
@@ -26,7 +26,7 @@ Explicitly clears com.owlitech.spatial data after installation. Disabled by defa
 Explicitly grants android.permission.CAMERA after installation. Disabled by default.
 
 .PARAMETER CaptureLogcat
-Writes one bounded, app-PID-focused `adb logcat -d` snapshot after launch. No background process is left running.
+Writes one bounded, app-PID-focused logcat snapshot after launch. No background process is left running.
 
 .PARAMETER Help
 Shows detailed help and exits without building or contacting ADB.
@@ -66,188 +66,144 @@ if ($Help) {
 $ApplicationId = 'com.owlitech.spatial'
 $LaunchComponent = 'com.owlitech.spatial/.MainActivity'
 $CameraPermission = 'android.permission.CAMERA'
-$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath '..'))
-$GradleWrapper = Join-Path -Path $RepoRoot -ChildPath 'gradlew.bat'
-$ApkPath = Join-Path -Path $RepoRoot -ChildPath 'app/build/outputs/apk/debug/app-debug.apk'
+$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$GradleWrapper = Join-Path $RepoRoot 'gradlew.bat'
+$ApkPath = Join-Path $RepoRoot 'app/build/outputs/apk/debug/app-debug.apk'
 $ProvenancePath = "$ApkPath.provenance.json"
 
-function Invoke-NativeProcess {
+function Invoke-Native {
     param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [switch]$EchoOutput,
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [switch]$Echo,
         [switch]$AllowFailure
     )
 
-    $rawOutput = @(& $FilePath @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
-    $lines = @($rawOutput | ForEach-Object { $_.ToString() })
-
-    if ($EchoOutput) {
-        foreach ($line in $lines) {
-            Write-Host $line
-        }
+    $raw = @(& $File @Arguments 2>&1)
+    $code = $LASTEXITCODE
+    $lines = @($raw | ForEach-Object { $_.ToString() })
+    if ($Echo) {
+        $lines | ForEach-Object { Write-Host $_ }
     }
-
-    if (-not $AllowFailure -and $exitCode -ne 0) {
-        $rendered = if ($lines.Count -gt 0) { $lines -join [Environment]::NewLine } else { '<no output>' }
-        throw "Command failed with exit code $exitCode: $FilePath $($Arguments -join ' ')`n$rendered"
+    if (-not $AllowFailure -and $code -ne 0) {
+        $details = if ($lines.Count -gt 0) { $lines -join [Environment]::NewLine } else { '<no output>' }
+        throw "Command failed with exit code $code: $File $($Arguments -join ' ')`n$details"
     }
-
-    return [pscustomobject]@{
-        ExitCode = $exitCode
-        Lines = $lines
-    }
+    [pscustomobject]@{ ExitCode = $code; Lines = $lines }
 }
 
-function Get-Sha256ForText {
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+function Get-TextSha256 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
 
-    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        ([System.BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     }
     finally {
-        $sha.Dispose()
+        $hasher.Dispose()
     }
 }
 
 function Get-GitEvidence {
-    param([Parameter(Mandatory = $true)][string]$Root)
-
-    $gitCommand = Get-Command -Name git -CommandType Application -ErrorAction Stop
-    $git = $gitCommand.Source
-
-    $headResult = Invoke-NativeProcess -FilePath $git -Arguments @('-C', $Root, 'rev-parse', 'HEAD')
+    $git = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+    $headResult = Invoke-Native $git @('-C', $RepoRoot, 'rev-parse', 'HEAD')
     $head = (($headResult.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) ?? '').Trim()
     if ($head -notmatch '^[0-9a-fA-F]{40}$') {
         throw "Git HEAD is unavailable or not a full 40-character SHA: '$head'"
     }
 
-    $statusResult = Invoke-NativeProcess -FilePath $git -Arguments @('-C', $Root, '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all')
-    $diffResult = Invoke-NativeProcess -FilePath $git -Arguments @('-C', $Root, 'diff', '--binary', 'HEAD', '--', '.')
-    $statusText = $statusResult.Lines -join "`n"
-    $diffText = $diffResult.Lines -join "`n"
-    $fingerprint = Get-Sha256ForText -Text ("STATUS`n$statusText`nDIFF`n$diffText")
-
-    return [pscustomobject]@{
+    $status = Invoke-Native $git @('-C', $RepoRoot, '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all')
+    $diff = Invoke-Native $git @('-C', $RepoRoot, 'diff', '--binary', 'HEAD', '--', '.')
+    $statusText = $status.Lines -join "`n"
+    $diffText = $diff.Lines -join "`n"
+    [pscustomobject]@{
         Head = $head.ToLowerInvariant()
-        IsDirty = $statusResult.Lines.Count -gt 0
-        WorktreeFingerprint = $fingerprint
+        IsDirty = $status.Lines.Count -gt 0
+        WorktreeFingerprint = Get-TextSha256 "STATUS`n$statusText`nDIFF`n$diffText"
     }
 }
 
 function Write-Provenance {
-    param(
-        [Parameter(Mandatory = $true)]$GitEvidence,
-        [Parameter(Mandatory = $true)][string]$CurrentApkSha
-    )
+    param([Parameter(Mandatory)]$GitEvidence, [Parameter(Mandatory)][string]$ApkSha)
 
-    $record = [ordered]@{
+    [ordered]@{
         SchemaVersion = 1
         GitHead = $GitEvidence.Head
         WorktreeFingerprint = $GitEvidence.WorktreeFingerprint
-        ApkSha256 = $CurrentApkSha
-    }
-    $record | ConvertTo-Json | Set-Content -LiteralPath $ProvenancePath -Encoding utf8NoBOM
+        ApkSha256 = $ApkSha
+    } | ConvertTo-Json | Set-Content -LiteralPath $ProvenancePath -Encoding utf8NoBOM
 }
 
-function Assert-CurrentProvenance {
-    param(
-        [Parameter(Mandatory = $true)]$GitEvidence,
-        [Parameter(Mandatory = $true)][string]$CurrentApkSha
-    )
+function Assert-Provenance {
+    param([Parameter(Mandatory)]$GitEvidence, [Parameter(Mandatory)][string]$ApkSha)
 
     if (-not (Test-Path -LiteralPath $ProvenancePath -PathType Leaf)) {
-        throw "-NoBuild refused: provenance sidecar is missing. Run this script once without -NoBuild for the current checkout."
+        throw '-NoBuild refused: provenance sidecar is missing. Run once without -NoBuild for this checkout.'
     }
-
     try {
         $record = Get-Content -LiteralPath $ProvenancePath -Raw | ConvertFrom-Json
     }
     catch {
         throw "-NoBuild refused: provenance sidecar is unreadable: $($_.Exception.Message)"
     }
-
     if ($record.SchemaVersion -ne 1 -or
         $record.GitHead -ne $GitEvidence.Head -or
         $record.WorktreeFingerprint -ne $GitEvidence.WorktreeFingerprint -or
-        $record.ApkSha256 -ne $CurrentApkSha) {
-        throw "-NoBuild refused: the APK is stale or does not match the current Git/worktree state."
+        $record.ApkSha256 -ne $ApkSha) {
+        throw '-NoBuild refused: the APK is stale or does not match the current Git/worktree state.'
     }
 }
 
-function Resolve-AdbExecutable {
-    param([string]$ExplicitPath)
-
-    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
-        if (-not (Test-Path -LiteralPath $ExplicitPath -PathType Leaf)) {
-            throw "Explicit -AdbPath does not exist: $ExplicitPath"
+function Resolve-Adb {
+    if (-not [string]::IsNullOrWhiteSpace($AdbPath)) {
+        if (-not (Test-Path -LiteralPath $AdbPath -PathType Leaf)) {
+            throw "Explicit -AdbPath does not exist: $AdbPath"
         }
-        return (Resolve-Path -LiteralPath $ExplicitPath).Path
+        return (Resolve-Path -LiteralPath $AdbPath).Path
     }
 
     foreach ($sdkRoot in @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)) {
-        if ([string]::IsNullOrWhiteSpace($sdkRoot)) {
-            continue
-        }
-        $candidate = Join-Path -Path $sdkRoot -ChildPath 'platform-tools/adb.exe'
+        if ([string]::IsNullOrWhiteSpace($sdkRoot)) { continue }
+        $candidate = Join-Path $sdkRoot 'platform-tools/adb.exe'
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
 
-    $pathCommand = Get-Command -Name adb.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -ne $pathCommand) {
-        return $pathCommand.Source
-    }
-
+    $pathAdb = Get-Command adb.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -ne $pathAdb) { return $pathAdb.Source }
     throw 'ADB was not found. Use -AdbPath, ANDROID_SDK_ROOT, ANDROID_HOME, or place adb.exe on PATH.'
 }
 
-function Get-AdbDevices {
-    param([Parameter(Mandatory = $true)][string]$AdbExecutable)
+function Get-Devices {
+    param([Parameter(Mandatory)][string]$Adb)
 
-    $result = Invoke-NativeProcess -FilePath $AdbExecutable -Arguments @('devices', '-l')
-    $devices = @()
+    $result = Invoke-Native $Adb @('devices', '-l')
+    $devices = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $result.Lines) {
         $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('List of devices attached')) {
-            continue
-        }
-        if ($trimmed -notmatch '^(?<serial>\S+)\s+(?<state>\S+)(?:\s+(?<details>.*))?$') {
-            continue
-        }
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('List of devices attached')) { continue }
+        if ($trimmed -notmatch '^(?<serial>\S+)\s+(?<state>\S+)(?:\s+(?<details>.*))?$') { continue }
 
-        $serialValue = $Matches.serial
-        $stateValue = $Matches.state
-        $detailsValue = if ($Matches.ContainsKey('details')) { $Matches['details'] } else { '' }
-        $detailMap = @{}
-        foreach ($token in ($detailsValue -split '\s+')) {
-            if ($token -match '^(?<key>[^:]+):(?<value>.*)$') {
-                $detailMap[$Matches.key] = $Matches.value
-            }
+        $properties = @{}
+        $details = if ($Matches.ContainsKey('details')) { $Matches.details } else { '' }
+        foreach ($token in ($details -split '\s+')) {
+            if ($token -match '^(?<key>[^:]+):(?<value>.*)$') { $properties[$Matches.key] = $Matches.value }
         }
-
-        $devices += [pscustomobject]@{
-            Serial = $serialValue
-            State = $stateValue
-            Model = ($detailMap['model'] ?? '')
-            Product = ($detailMap['product'] ?? '')
-            Device = ($detailMap['device'] ?? '')
-        }
+        $devices.Add([pscustomobject]@{
+            Serial = $Matches.serial
+            State = $Matches.state
+            Model = ($properties.model ?? '')
+            Product = ($properties.product ?? '')
+            Device = ($properties.device ?? '')
+        })
     }
-    return @($devices)
+    $devices.ToArray()
 }
 
-function Write-DeviceCandidates {
-    param([Parameter(Mandatory = $true)][object[]]$Devices)
-
-    if ($Devices.Count -eq 0) {
-        Write-Host 'ADB devices: <none>'
-        return
-    }
+function Write-Devices {
+    param([Parameter(Mandatory)][object[]]$Devices)
 
     Write-Host 'ADB devices:'
     foreach ($device in $Devices) {
@@ -255,72 +211,58 @@ function Write-DeviceCandidates {
     }
 }
 
-function Select-AdbDevice {
-    param(
-        [Parameter(Mandatory = $true)][object[]]$Devices,
-        [string]$RequestedSerial
-    )
+function Select-Device {
+    param([Parameter(Mandatory)][object[]]$Devices)
 
-    if (-not [string]::IsNullOrWhiteSpace($RequestedSerial)) {
-        $matches = @($Devices | Where-Object { $_.Serial -ceq $RequestedSerial })
+    if (-not [string]::IsNullOrWhiteSpace($Serial)) {
+        $matches = @($Devices | Where-Object { $_.Serial -ceq $Serial })
         if ($matches.Count -ne 1) {
-            Write-DeviceCandidates -Devices $Devices
-            throw "Requested ADB serial was not found exactly once: $RequestedSerial"
+            Write-Devices $Devices
+            throw "Requested ADB serial was not found exactly once: $Serial"
         }
         if ($matches[0].State -ne 'device') {
-            Write-DeviceCandidates -Devices $Devices
-            throw "Requested ADB serial is not online in 'device' state: $RequestedSerial ($($matches[0].State))"
+            Write-Devices $Devices
+            throw "Requested ADB serial is not online in 'device' state: $Serial ($($matches[0].State))"
         }
         return $matches[0]
     }
 
     if ($Devices.Count -ne 1 -or $Devices[0].State -ne 'device') {
-        Write-DeviceCandidates -Devices $Devices
+        Write-Devices $Devices
         throw 'Exactly one attached online ADB device is required when -Serial is omitted.'
     }
-    return $Devices[0]
+    $Devices[0]
 }
 
-function Invoke-SelectedAdb {
+function Invoke-DeviceAdb {
     param(
-        [Parameter(Mandatory = $true)][string]$AdbExecutable,
-        [Parameter(Mandatory = $true)][string]$SelectedSerial,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [switch]$EchoOutput,
+        [Parameter(Mandatory)][string]$Adb,
+        [Parameter(Mandatory)][string]$SelectedSerial,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [switch]$Echo,
         [switch]$AllowFailure
     )
-
-    return Invoke-NativeProcess -FilePath $AdbExecutable -Arguments (@('-s', $SelectedSerial) + $Arguments) -EchoOutput:$EchoOutput -AllowFailure:$AllowFailure
+    Invoke-Native $Adb (@('-s', $SelectedSerial) + $Arguments) -Echo:$Echo -AllowFailure:$AllowFailure
 }
 
-function Get-SelectedAdbValue {
-    param(
-        [Parameter(Mandatory = $true)][string]$AdbExecutable,
-        [Parameter(Mandatory = $true)][string]$SelectedSerial,
-        [Parameter(Mandatory = $true)][string]$PropertyName
-    )
+function Get-DeviceProperty {
+    param([Parameter(Mandatory)][string]$Adb, [Parameter(Mandatory)][string]$SelectedSerial, [Parameter(Mandatory)][string]$Name)
 
-    $result = Invoke-SelectedAdb -AdbExecutable $AdbExecutable -SelectedSerial $SelectedSerial -Arguments @('shell', 'getprop', $PropertyName)
-    return ((($result.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1) ?? '')).Trim()
+    $result = Invoke-DeviceAdb $Adb $SelectedSerial @('shell', 'getprop', $Name)
+    ((($result.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1) ?? '')).Trim()
 }
 
-function Get-BatteryEvidence {
-    param(
-        [Parameter(Mandatory = $true)][string]$AdbExecutable,
-        [Parameter(Mandatory = $true)][string]$SelectedSerial
-    )
+function Get-Battery {
+    param([Parameter(Mandatory)][string]$Adb, [Parameter(Mandatory)][string]$SelectedSerial)
 
-    $result = Invoke-SelectedAdb -AdbExecutable $AdbExecutable -SelectedSerial $SelectedSerial -Arguments @('shell', 'dumpsys', 'battery') -AllowFailure
-    if ($result.ExitCode -ne 0) {
-        return [pscustomobject]@{ Level = 'unavailable'; Status = 'unavailable' }
-    }
-
+    $result = Invoke-DeviceAdb $Adb $SelectedSerial @('shell', 'dumpsys', 'battery') -AllowFailure
+    if ($result.ExitCode -ne 0) { return [pscustomobject]@{ Level = 'unavailable'; Status = 'unavailable' } }
     $text = $result.Lines -join "`n"
-    $level = if ($text -match '(?m)^\s*level:\s*(?<value>\d+)\s*$') { $Matches.value } else { 'unavailable' }
-    $statusCode = if ($text -match '(?m)^\s*status:\s*(?<value>\d+)\s*$') { $Matches.value } else { 'unavailable' }
-    $statusNames = @{ '1' = 'unknown'; '2' = 'charging'; '3' = 'discharging'; '4' = 'not-charging'; '5' = 'full' }
-    $status = if ($statusNames.ContainsKey($statusCode)) { "$statusCode ($($statusNames[$statusCode]))" } else { $statusCode }
-    return [pscustomobject]@{ Level = $level; Status = $status }
+    $level = if ($text -match '(?m)^\s*level:\s*(?<v>\d+)\s*$') { $Matches.v } else { 'unavailable' }
+    $code = if ($text -match '(?m)^\s*status:\s*(?<v>\d+)\s*$') { $Matches.v } else { 'unavailable' }
+    $names = @{ '1' = 'unknown'; '2' = 'charging'; '3' = 'discharging'; '4' = 'not-charging'; '5' = 'full' }
+    $status = if ($names.ContainsKey($code)) { "$code ($($names[$code]))" } else { $code }
+    [pscustomobject]@{ Level = $level; Status = $status }
 }
 
 try {
@@ -331,46 +273,46 @@ try {
         throw "Checked-in Gradle wrapper was not found: $GradleWrapper"
     }
 
-    $gitEvidence = Get-GitEvidence -Root $RepoRoot
-
+    $git = Get-GitEvidence
     if (-not $NoBuild) {
         Remove-Item -LiteralPath $ApkPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $ProvenancePath -Force -ErrorAction SilentlyContinue
         Write-Host "Building current checkout with: $GradleWrapper :app:assembleDebug"
-        Invoke-NativeProcess -FilePath $GradleWrapper -Arguments @(':app:assembleDebug') -EchoOutput | Out-Null
+        Invoke-Native $GradleWrapper @(':app:assembleDebug') -Echo | Out-Null
     }
-
     if (-not (Test-Path -LiteralPath $ApkPath -PathType Leaf)) {
         throw "Expected debug APK does not exist: $ApkPath"
     }
 
     $apkSha = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($NoBuild) {
-        Assert-CurrentProvenance -GitEvidence $gitEvidence -CurrentApkSha $apkSha
-    }
-    else {
-        Write-Provenance -GitEvidence $gitEvidence -CurrentApkSha $apkSha
-    }
+    if ($NoBuild) { Assert-Provenance $git $apkSha } else { Write-Provenance $git $apkSha }
 
     Write-Host '--- Build provenance ---'
-    Write-Host "Git HEAD: $($gitEvidence.Head)"
-    Write-Host ("Git worktree: {0}" -f $(if ($gitEvidence.IsDirty) { 'dirty' } else { 'clean' }))
+    Write-Host "Git HEAD: $($git.Head)"
+    Write-Host ("Git worktree: {0}" -f $(if ($git.IsDirty) { 'dirty' } else { 'clean' }))
     Write-Host "APK path: $ApkPath"
     Write-Host "APK SHA-256: $apkSha"
 
-    $adb = Resolve-AdbExecutable -ExplicitPath $AdbPath
-    $devices = Get-AdbDevices -AdbExecutable $adb
-    $selected = Select-AdbDevice -Devices $devices -RequestedSerial $Serial
+    $adb = Resolve-Adb
+    $devices = @(Get-Devices $adb)
+    if ($devices.Count -eq 0) {
+        Write-Host 'ADB devices: <none>'
+        if (-not [string]::IsNullOrWhiteSpace($Serial)) {
+            throw "Requested ADB serial was not found exactly once: $Serial"
+        }
+        throw 'Exactly one attached online ADB device is required when -Serial is omitted.'
+    }
+    $selected = Select-Device $devices
     $selectedSerial = $selected.Serial
 
-    $manufacturer = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.product.manufacturer'
-    $model = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.product.model'
-    $product = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.product.name'
-    $deviceName = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.product.device'
-    $androidRelease = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.build.version.release'
-    $sdkLevel = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.build.version.sdk'
-    $fingerprint = Get-SelectedAdbValue -AdbExecutable $adb -SelectedSerial $selectedSerial -PropertyName 'ro.build.fingerprint'
-    $battery = Get-BatteryEvidence -AdbExecutable $adb -SelectedSerial $selectedSerial
+    $manufacturer = Get-DeviceProperty $adb $selectedSerial 'ro.product.manufacturer'
+    $model = Get-DeviceProperty $adb $selectedSerial 'ro.product.model'
+    $product = Get-DeviceProperty $adb $selectedSerial 'ro.product.name'
+    $deviceName = Get-DeviceProperty $adb $selectedSerial 'ro.product.device'
+    $androidRelease = Get-DeviceProperty $adb $selectedSerial 'ro.build.version.release'
+    $sdk = Get-DeviceProperty $adb $selectedSerial 'ro.build.version.sdk'
+    $fingerprint = Get-DeviceProperty $adb $selectedSerial 'ro.build.fingerprint'
+    $battery = Get-Battery $adb $selectedSerial
 
     Write-Host '--- Selected device ---'
     Write-Host "ADB path: $adb"
@@ -380,60 +322,46 @@ try {
     Write-Host "Product: $product"
     Write-Host "Device: $deviceName"
     Write-Host "Android release: $androidRelease"
-    Write-Host "SDK level: $sdkLevel"
+    Write-Host "SDK level: $sdk"
     Write-Host "Build fingerprint: $fingerprint"
     Write-Host "Battery level: $($battery.Level)"
     Write-Host "Battery status: $($battery.Status)"
 
     Write-Host 'Installing debug APK with replacement semantics...'
-    $installResult = Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('install', '-r', $ApkPath) -EchoOutput
-    if (($installResult.Lines -join "`n") -match '(?im)^\s*Failure\b') {
-        throw 'ADB reported an installation failure.'
-    }
+    $install = Invoke-DeviceAdb $adb $selectedSerial @('install', '-r', $ApkPath) -Echo
+    if (($install.Lines -join "`n") -match '(?im)^\s*Failure\b') { throw 'ADB reported an installation failure.' }
 
     if ($ClearAppData) {
         Write-Host 'Clearing application data (explicit opt-in)...'
-        $clearResult = Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('shell', 'pm', 'clear', $ApplicationId) -EchoOutput
-        if (($clearResult.Lines -join "`n") -notmatch '(?im)^\s*Success\s*$') {
-            throw 'Application data clear did not report Success.'
-        }
+        $clear = Invoke-DeviceAdb $adb $selectedSerial @('shell', 'pm', 'clear', $ApplicationId) -Echo
+        if (($clear.Lines -join "`n") -notmatch '(?im)^\s*Success\s*$') { throw 'Application data clear did not report Success.' }
     }
-
     if ($GrantCameraPermission) {
         Write-Host 'Granting camera permission (explicit opt-in)...'
-        Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('shell', 'pm', 'grant', $ApplicationId, $CameraPermission) -EchoOutput | Out-Null
+        Invoke-DeviceAdb $adb $selectedSerial @('shell', 'pm', 'grant', $ApplicationId, $CameraPermission) -Echo | Out-Null
     }
 
     if (-not $NoLaunch) {
         if (-not [string]::IsNullOrWhiteSpace($CaptureLogcat)) {
-            Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('logcat', '-c') | Out-Null
+            Invoke-DeviceAdb $adb $selectedSerial @('logcat', '-c') | Out-Null
         }
-
         Write-Host "Launching $LaunchComponent..."
-        $launchResult = Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('shell', 'am', 'start', '-W', '-n', $LaunchComponent) -EchoOutput
-        if (($launchResult.Lines -join "`n") -match '(?im)^\s*(Error:|Exception)') {
-            throw 'ADB activity start reported an error.'
-        }
+        $launch = Invoke-DeviceAdb $adb $selectedSerial @('shell', 'am', 'start', '-W', '-n', $LaunchComponent) -Echo
+        if (($launch.Lines -join "`n") -match '(?im)^\s*(Error:|Exception)') { throw 'ADB activity start reported an error.' }
 
         if (-not [string]::IsNullOrWhiteSpace($CaptureLogcat)) {
-            $pidResult = Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('shell', 'pidof', $ApplicationId)
+            $pidResult = Invoke-DeviceAdb $adb $selectedSerial @('shell', 'pidof', $ApplicationId)
             $pid = ((($pidResult.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) ?? '') -split '\s+')[0]
-            if ($pid -notmatch '^\d+$') {
-                throw "Could not resolve a running PID for $ApplicationId after launch."
-            }
-
-            $logResult = Invoke-SelectedAdb -AdbExecutable $adb -SelectedSerial $selectedSerial -Arguments @('logcat', '-d', '-v', 'threadtime', "--pid=$pid")
+            if ($pid -notmatch '^\d+$') { throw "Could not resolve a running PID for $ApplicationId after launch." }
+            $log = Invoke-DeviceAdb $adb $selectedSerial @('logcat', '-d', '-v', 'threadtime', "--pid=$pid")
             $logPath = if ([System.IO.Path]::IsPathRooted($CaptureLogcat)) {
                 [System.IO.Path]::GetFullPath($CaptureLogcat)
+            } else {
+                [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $CaptureLogcat))
             }
-            else {
-                [System.IO.Path]::GetFullPath((Join-Path -Path (Get-Location).Path -ChildPath $CaptureLogcat))
-            }
-            $logDirectory = Split-Path -Path $logPath -Parent
-            if (-not [string]::IsNullOrWhiteSpace($logDirectory)) {
-                New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
-            }
-            $logResult.Lines | Set-Content -LiteralPath $logPath -Encoding utf8NoBOM
+            $directory = Split-Path $logPath -Parent
+            if (-not [string]::IsNullOrWhiteSpace($directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+            $log.Lines | Set-Content -LiteralPath $logPath -Encoding utf8NoBOM
             Write-Host "Bounded app logcat snapshot: $logPath"
         }
     }
