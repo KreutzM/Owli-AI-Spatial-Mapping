@@ -3,10 +3,48 @@
 ## Required layers
 
 - **JVM:** geometry, depth projection, indexing, confidence semantics, voxel/map logic.
-- **Android unit:** pure adapters, text/state mappings, failure handling.
-- **Generic AVD:** app launch, accessibility-visible diagnostics, permissions, lifecycle, unsupported AR path.
+- **Android unit:** diagnostic conversion, installation and permission states, ARCore error mappings, session ownership/lifecycle, GL prerequisites, failure handling, UI publication limits, and text/state mappings.
+- **Generic AVD:** app launch, accessibility-visible diagnostic cards, permission action, lifecycle/relaunch behavior, and the unsupported/unavailable AR path.
 - **ARCore emulator spike:** session and virtual-scene tracking only after a dedicated issue.
-- **Galaxy S23+:** Depth support, confidence, resolution, thermal behavior, frame rate, drift, and real mapping quality.
+- **Galaxy S23+:** real ARCore tracking, pose, native image intrinsics, lifecycle, rotation, and camera-indicator validation for Issue #8; later Depth or mapping claims require their own issue and evidence.
+
+## Issue #8 deterministic coverage
+
+The app unit suite uses fake installation and session ports. It verifies:
+
+- exactly one owned Session across repeated resume-style events;
+- no creation or resume without installed ARCore and camera permission;
+- a user-initiated install request with one non-looping resume follow-up;
+- explicit installation and Session error mappings;
+- exact create/resume/surface/pause/close ordering, including GL-first prerequisite loss;
+- idempotent pause and close and no updates while paused;
+- valid texture and positive viewport requirements;
+- update failures becoming visible diagnostic errors;
+- tracking-state and failure-reason mappings;
+- removal of current pose and intrinsics for `PAUSED` and `STOPPED`;
+- exact `(x, y, z, w)` to `(w, x, y, z)` quaternion conversion and unchanged metric translation;
+- rejection of non-finite or invalid native image intrinsics;
+- at most eight regular diagnostic publications per second plus immediate state changes;
+- single-slot UI backpressure and permission actions that match the current state.
+
+Run the required local checks from the repository root:
+
+```bash
+python tools/check_architecture_guardrails.py
+./gradlew \
+  :mapping-core:test \
+  :app:testDebugUnitTest \
+  :app:lintDebug \
+  :app:assembleDebug \
+  --stacktrace --no-daemon
+./gradlew \
+  pixel2Api35DebugAndroidTest \
+  -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect \
+  --stacktrace --no-daemon
+git diff --check
+```
+
+The managed AVD demonstrates only launch, accessibility, permission/lifecycle behavior, and an understandable unsupported/unavailable path. It does not demonstrate real ARCore tracking, pose quality, native-device intrinsics, Depth support, or mapping.
 
 ## Video and replay
 
