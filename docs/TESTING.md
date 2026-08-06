@@ -60,6 +60,8 @@ pwsh -NoProfile -File ./scripts/Build-Install-Run.ps1 -Help
 ./gradlew.bat :app:testDebugUnitTest --tests com.owlitech.spatial.tooling.BuildInstallRunScriptTest
 ```
 
+The `-Help` command is intentionally device-free and must complete before any Gradle, Git, or ADB side effect.
+
 Run the required local checks from the repository root:
 
 ```bash
