@@ -104,6 +104,10 @@ class MainActivity : ComponentActivity() {
         )
         permissionTracker = CameraPermissionTracker(
             CameraPermissionRequestRecord(
+                requestInFlight = savedInstanceState?.getBoolean(
+                    STATE_CAMERA_PERMISSION_REQUEST_IN_FLIGHT,
+                    false,
+                ) == true,
                 lastCompletedOutcome = restoredCompletedPermissionOutcome(),
             ),
         )
@@ -193,6 +197,10 @@ class MainActivity : ComponentActivity() {
         outState.putBoolean(
             STATE_INSTALL_ATTEMPT_PENDING,
             installController.snapshot().awaitingReturnFromInstallUi,
+        )
+        outState.putBoolean(
+            STATE_CAMERA_PERMISSION_REQUEST_IN_FLIGHT,
+            permissionTracker.snapshot().requestInFlight,
         )
         super.onSaveInstanceState(outState)
     }
@@ -311,5 +319,7 @@ class MainActivity : ComponentActivity() {
         const val PERMISSION_PREFERENCES = "camera_permission_state"
         const val KEY_PERMISSION_COMPLETED_OUTCOME = "camera_permission_completed_outcome"
         const val STATE_INSTALL_ATTEMPT_PENDING = "arcore_install_attempt_pending"
+        const val STATE_CAMERA_PERMISSION_REQUEST_IN_FLIGHT =
+            "camera_permission_request_in_flight"
     }
 }

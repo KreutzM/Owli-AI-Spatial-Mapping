@@ -21,6 +21,27 @@ class CameraPermissionTest {
         assertEquals(CameraPermissionAction.NONE, CameraPermissionState.REQUEST_IN_FLIGHT.availableAction())
     }
 
+
+    @Test
+    fun inFlightRetrySurvivesTrackerRecreationWithoutReusingEarlierDenial() {
+        val tracker = CameraPermissionTracker(
+            CameraPermissionRequestRecord(
+                lastCompletedOutcome = CameraPermissionRequestOutcome.DENIED,
+            ),
+        )
+        tracker.onRequestLaunched()
+
+        val recreated = CameraPermissionTracker(tracker.snapshot())
+
+        assertEquals(
+            CameraPermissionState.REQUEST_IN_FLIGHT,
+            recreated.currentState(
+                granted = false,
+                shouldShowRequestPermissionRationale = false,
+            ),
+        )
+    }
+
     @Test
     fun interruptedRequestCanBeRestoredAsUnknownAndRequestable() {
         val restored = CameraPermissionTracker(
