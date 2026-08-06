@@ -16,8 +16,7 @@ on:
 permissions:
   actions: read
   contents: read
-  issues: write
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: post-merge-handoff-${{ github.event.workflow_run.head_sha || inputs.repo_pack_run_id }}
