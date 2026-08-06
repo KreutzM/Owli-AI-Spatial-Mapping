@@ -82,9 +82,7 @@ function Invoke-Native {
     $raw = @(& $File @Arguments 2>&1)
     $code = $LASTEXITCODE
     $lines = @($raw | ForEach-Object { $_.ToString() })
-    if ($Echo) {
-        $lines | ForEach-Object { Write-Host $_ }
-    }
+    if ($Echo) { $lines | ForEach-Object { Write-Host $_ } }
     if (-not $AllowFailure -and $code -ne 0) {
         $details = if ($lines.Count -gt 0) { $lines -join [Environment]::NewLine } else { '<no output>' }
         throw "Command failed with exit code $code: $File $($Arguments -join ' ')`n$details"
@@ -100,9 +98,7 @@ function Get-TextSha256 {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
         ([System.BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     }
-    finally {
-        $hasher.Dispose()
-    }
+    finally { $hasher.Dispose() }
 }
 
 function Get-GitEvidence {
@@ -141,12 +137,8 @@ function Assert-Provenance {
     if (-not (Test-Path -LiteralPath $ProvenancePath -PathType Leaf)) {
         throw '-NoBuild refused: provenance sidecar is missing. Run once without -NoBuild for this checkout.'
     }
-    try {
-        $record = Get-Content -LiteralPath $ProvenancePath -Raw | ConvertFrom-Json
-    }
-    catch {
-        throw "-NoBuild refused: provenance sidecar is unreadable: $($_.Exception.Message)"
-    }
+    try { $record = Get-Content -LiteralPath $ProvenancePath -Raw | ConvertFrom-Json }
+    catch { throw "-NoBuild refused: provenance sidecar is unreadable: $($_.Exception.Message)" }
     if ($record.SchemaVersion -ne 1 -or
         $record.GitHead -ne $GitEvidence.Head -or
         $record.WorktreeFingerprint -ne $GitEvidence.WorktreeFingerprint -or
@@ -186,17 +178,19 @@ function Get-Devices {
         if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('List of devices attached')) { continue }
         if ($trimmed -notmatch '^(?<serial>\S+)\s+(?<state>\S+)(?:\s+(?<details>.*))?$') { continue }
 
+        $serialValue = $Matches.serial
+        $stateValue = $Matches.state
+        $detailsValue = if ($Matches.ContainsKey('details')) { $Matches.details } else { '' }
         $properties = @{}
-        $details = if ($Matches.ContainsKey('details')) { $Matches.details } else { '' }
-        foreach ($token in ($details -split '\s+')) {
+        foreach ($token in ($detailsValue -split '\s+')) {
             if ($token -match '^(?<key>[^:]+):(?<value>.*)$') { $properties[$Matches.key] = $Matches.value }
         }
         $devices.Add([pscustomobject]@{
-            Serial = $Matches.serial
-            State = $Matches.state
-            Model = ($properties.model ?? '')
-            Product = ($properties.product ?? '')
-            Device = ($properties.device ?? '')
+            Serial = $serialValue
+            State = $stateValue
+            Model = ($properties['model'] ?? '')
+            Product = ($properties['product'] ?? '')
+            Device = ($properties['device'] ?? '')
         })
     }
     $devices.ToArray()
