@@ -103,6 +103,82 @@ class BuildInstallRunScriptTest {
     }
 
     @Test
+    fun noBuildRejectsTrackedAndUntrackedDirtyWorktrees() {
+        data class Case(val status: String, val diff: String)
+        listOf(
+            Case(" M tracked.txt\n", "diff --git a/tracked.txt b/tracked.txt\n"),
+            Case("?? Scratch.kt\n", ""),
+        ).forEach { case -> Fixture().use { f ->
+            assertEquals(0, f.run("-AdbPath", f.pathAdb.toString(), "-NoLaunch").code)
+            Files.deleteIfExists(f.gradleLog); Files.deleteIfExists(f.adbLog)
+            val result = f.run(
+                "-NoBuild", "-AdbPath", f.pathAdb.toString(), "-NoLaunch",
+                env = mapOf("FAKE_GIT_STATUS" to case.status, "FAKE_GIT_DIFF" to case.diff),
+            )
+            assertTrue(result.output, result.code != 0)
+            assertTrue(result.output, result.output.contains("worktree is dirty"))
+            assertFalse(Files.exists(f.gradleLog)); assertTrue(f.calls().isEmpty())
+        } }
+    }
+
+    @Test
+    fun noBuildRejectsSameUntrackedPathAfterOnlyContentsChange() = Fixture().use { f ->
+        val scratch = f.root.resolve("Scratch.kt")
+        val dirty = mapOf("FAKE_GIT_STATUS" to "?? Scratch.kt\n", "FAKE_GIT_DIFF" to "")
+        Files.writeString(scratch, "first contents")
+        assertEquals(0, f.run("-AdbPath", f.pathAdb.toString(), "-NoLaunch", env = dirty).code)
+        Files.deleteIfExists(f.gradleLog); Files.deleteIfExists(f.adbLog)
+
+        Files.writeString(scratch, "changed contents only")
+        val result = f.run("-NoBuild", "-AdbPath", f.pathAdb.toString(), "-NoLaunch", env = dirty)
+        assertTrue(result.output, result.code != 0)
+        assertTrue(result.output, result.output.contains("worktree is dirty"))
+        assertFalse(Files.exists(f.gradleLog)); assertTrue(f.calls().isEmpty())
+    }
+
+    @Test
+    fun dirtyNoBuildStopsBeforeInstallClearGrantLaunchOrLogcat() = Fixture().use { f ->
+        assertEquals(0, f.run("-AdbPath", f.pathAdb.toString(), "-NoLaunch").code)
+        Files.deleteIfExists(f.gradleLog); Files.deleteIfExists(f.adbLog)
+        val log = f.root.resolve("must not exist/log.txt")
+        val result = f.run(
+            "-NoBuild", "-AdbPath", f.pathAdb.toString(),
+            "-ClearAppData", "-GrantCameraPermission", "-CaptureLogcat", log.toString(),
+            env = mapOf("FAKE_GIT_STATUS" to "?? Scratch.kt\n"),
+        )
+        assertTrue(result.output, result.code != 0)
+        assertTrue(result.output, result.output.contains("worktree is dirty"))
+        assertFalse(Files.exists(f.gradleLog)); assertTrue(f.calls().isEmpty()); assertFalse(Files.exists(log))
+    }
+
+    @Test
+    fun noBuildRejectsMissingProvenanceApkHashMismatchAndHeadMismatch() {
+        Fixture().use { f ->
+            Files.createDirectories(f.apk.parent); Files.writeString(f.apk, "current-apk")
+            val result = f.run("-NoBuild", "-AdbPath", f.pathAdb.toString(), "-NoLaunch")
+            assertTrue(result.output, result.code != 0)
+            assertTrue(result.output, result.output.contains("provenance sidecar is missing")); assertTrue(f.calls().isEmpty())
+        }
+        Fixture().use { f ->
+            assertEquals(0, f.run("-AdbPath", f.pathAdb.toString(), "-NoLaunch").code)
+            Files.deleteIfExists(f.gradleLog); Files.deleteIfExists(f.adbLog); Files.writeString(f.apk, "tampered-apk")
+            val result = f.run("-NoBuild", "-AdbPath", f.pathAdb.toString(), "-NoLaunch")
+            assertTrue(result.output, result.code != 0)
+            assertTrue(result.output, result.output.contains("APK is stale")); assertTrue(f.calls().isEmpty())
+        }
+        Fixture().use { f ->
+            assertEquals(0, f.run("-AdbPath", f.pathAdb.toString(), "-NoLaunch").code)
+            Files.deleteIfExists(f.gradleLog); Files.deleteIfExists(f.adbLog)
+            val result = f.run(
+                "-NoBuild", "-AdbPath", f.pathAdb.toString(), "-NoLaunch",
+                env = mapOf("FAKE_GIT_HEAD" to "b".repeat(40)),
+            )
+            assertTrue(result.output, result.code != 0)
+            assertTrue(result.output, result.output.contains("APK is stale")); assertTrue(f.calls().isEmpty())
+        }
+    }
+
+    @Test
     fun installFailurePreventsLaunchAndLaunchFailureIsNonZero() {
         Fixture().use { f ->
             val result = f.run("-AdbPath", f.pathAdb.toString(), env = mapOf("FAKE_ADB_INSTALL_EXIT" to "9"))

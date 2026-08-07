@@ -14,7 +14,7 @@ Selects one exact ADB serial. The script never falls back to another device.
 Uses one explicit adb executable before all environment and PATH discovery locations.
 
 .PARAMETER NoBuild
-Skips Gradle only when the exact APK and its generated provenance sidecar match the current checkout.
+Skips Gradle only when the exact APK and its generated provenance sidecar match the current clean checkout.
 
 .PARAMETER NoLaunch
 Builds and installs without launching the application.
@@ -85,7 +85,7 @@ function Invoke-Native {
     if ($Echo) { $lines | ForEach-Object { Write-Host $_ } }
     if (-not $AllowFailure -and $code -ne 0) {
         $details = if ($lines.Count -gt 0) { $lines -join [Environment]::NewLine } else { '<no output>' }
-        throw "Command failed with exit code $code: $File $($Arguments -join ' ')`n$details"
+        throw "Command failed with exit code ${code}: $File $($Arguments -join ' ')`n$details"
     }
     [pscustomobject]@{ ExitCode = $code; Lines = $lines }
 }
@@ -102,7 +102,7 @@ function Get-TextSha256 {
 }
 
 function Get-GitEvidence {
-    $git = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+    $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $headResult = Invoke-Native $git @('-C', $RepoRoot, 'rev-parse', 'HEAD')
     $head = (($headResult.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) ?? '').Trim()
     if ($head -notmatch '^[0-9a-fA-F]{40}$') {
@@ -268,6 +268,9 @@ try {
     }
 
     $git = Get-GitEvidence
+    if ($NoBuild -and $git.IsDirty) {
+        throw '-NoBuild refused: the Git worktree is dirty (including untracked files). Commit, stash, or remove local changes before reusing an APK.'
+    }
     if (-not $NoBuild) {
         Remove-Item -LiteralPath $ApkPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $ProvenancePath -Force -ErrorAction SilentlyContinue
@@ -345,9 +348,9 @@ try {
 
         if (-not [string]::IsNullOrWhiteSpace($CaptureLogcat)) {
             $pidResult = Invoke-DeviceAdb $adb $selectedSerial @('shell', 'pidof', $ApplicationId)
-            $pid = ((($pidResult.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) ?? '') -split '\s+')[0]
-            if ($pid -notmatch '^\d+$') { throw "Could not resolve a running PID for $ApplicationId after launch." }
-            $log = Invoke-DeviceAdb $adb $selectedSerial @('logcat', '-d', '-v', 'threadtime', "--pid=$pid")
+            $appPid = ((($pidResult.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) ?? '') -split '\s+')[0]
+            if ($appPid -notmatch '^\d+$') { throw "Could not resolve a running PID for $ApplicationId after launch." }
+            $log = Invoke-DeviceAdb $adb $selectedSerial @('logcat', '-d', '-v', 'threadtime', "--pid=$appPid")
             $logPath = if ([System.IO.Path]::IsPathRooted($CaptureLogcat)) {
                 [System.IO.Path]::GetFullPath($CaptureLogcat)
             } else {
