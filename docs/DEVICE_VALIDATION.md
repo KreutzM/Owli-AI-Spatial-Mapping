@@ -1,21 +1,84 @@
 # Galaxy S23+ Validation Record Template
 
-Each hardware run records:
+## Issue #8 status
 
-- repository commit SHA;
-- APK variant;
-- device model and model code;
-- Android build/version;
+Physical Galaxy S23+ validation is **pending maintainer** until a completed record is attached to the Draft PR. A generic AVD, fake Session, or self-hosted device of unknown model is not Galaxy S23+ evidence.
+
+Install the `app-debug.apk` produced from the exact Draft-PR head. Before running, record and verify:
+
+- full 40-character PR head SHA;
+- APK build variant (`debug`) and APK SHA-256;
+- device marketing model and Android model code;
+- Android version and full build identifier;
 - Google Play Services for AR version;
-- battery level and charging state;
-- mounting/orientation;
-- scene and lighting;
-- duration;
-- depth mode and resolution;
-- received, processed, and dropped frames;
-- mapping and render latency;
-- memory use and thermal status;
-- tracking losses and recovery;
-- observed failures and uncertainty handling.
+- battery level, charging state, display orientation, scene, and lighting.
+
+## Windows build/install/launch helper
+
+On Windows with PowerShell 7, Android platform tools, USB debugging, and an authorized phone connection, run the checked-in helper from any working directory:
+
+```powershell
+./scripts/Build-Install-Run.ps1
+./scripts/Build-Install-Run.ps1 -Serial R58M...
+./scripts/Build-Install-Run.ps1 -Serial R58M... -CaptureLogcat ./artifacts/s23plus-logcat.txt
+```
+
+The helper resolves the repository from its own path, builds the current checkout with `gradlew.bat :app:assembleDebug`, selects exactly one online ADB device unless `-Serial` is supplied, prints Git/device/APK provenance, installs `app-debug.apk` with `adb install -r`, and launches `com.owlitech.spatial/.MainActivity` unless `-NoLaunch` is used. Every ADB command after selection is scoped with `-s <serial>`.
+
+ADB discovery order is `-AdbPath`, `ANDROID_SDK_ROOT`, `ANDROID_HOME`, then `adb.exe` on `PATH`. Ambiguous, absent, offline, unauthorized, recovery, or sideload targets fail closed. `-NoBuild` is accepted only when the exact APK and the helper-generated provenance sidecar match the current Git HEAD, worktree fingerprint, and APK SHA-256; a failed build removes the prior expected APK before Gradle runs and never proceeds to installation.
+
+App-data clearing and camera-permission grants remain explicit opt-ins:
+
+```powershell
+./scripts/Build-Install-Run.ps1 -Serial R58M... -ClearAppData
+./scripts/Build-Install-Run.ps1 -Serial R58M... -GrantCameraPermission
+```
+
+`-CaptureLogcat <path>` performs one bounded app-PID-focused `logcat -d` snapshot after launch. It does not leave a background process running.
+
+The helper prepares and launches the exact checkout; it does **not** determine whether Galaxy S23+ validation passed. The human observations below must still be completed on the physical device and attached to the Draft PR for the exact head that was installed.
+
+Exercise and record all of the following:
+
+1. Start from the actual ARCore installation/update state and note whether the user-initiated install flow was required, completed, or already satisfied.
+2. During an install prompt, recreate the Activity where practical and confirm the restored pending attempt performs one non-looping follow-up after return.
+3. Exercise camera grant, denial/retry, and settings paths. Where the OS/device permits it, revoke or auto-reset a prior grant and confirm the UI remains requestable rather than calling it permanent denial.
+4. Measure time from foreground resume to first `TRACKING` in a suitable scene.
+5. Keep the diagnostic Session running for at least 60 seconds.
+6. Confirm the ARCore frame timestamp progresses.
+7. Deliberately translate and rotate the device; record representative translation values in metres and quaternion values in displayed `(w, x, y, z)` order.
+8. Record native image `fx`, `fy`, `cx`, `cy`, width, and height.
+9. Background and foreground the app once. Confirm diagnostics resume without a duplicate Session or crash and note the camera privacy indicator while paused.
+10. Recreate the Activity once while a Session is being released. Confirm the new instance waits for native close and does not create an overlapping Session.
+11. Rotate the display once and confirm continued operation.
+12. Where reproducible, cause tracking loss and recovery; confirm a lost-tracking observation does not retain a current pose or intrinsics.
+13. Record crashes, exceptions, unexpected status transitions, close duration, and all limitations.
+
+The record must not infer Depth support, point-cloud behavior, mapping quality, navigation behavior, or environmental conditions from this diagnostic run.
+
+## Validation record
+
+- Repository head SHA:
+- APK variant and SHA-256:
+- Device model / model code:
+- Android version / build:
+- Google Play Services for AR version:
+- Battery / charging:
+- Initial orientation, scene, and lighting:
+- ARCore install/update state and exercised recreation flow:
+- Camera-permission state and exercised flow:
+- Time to first `TRACKING`:
+- Continuous run duration (minimum 60 s):
+- Frame timestamp progression:
+- Translation observation during deliberate motion:
+- Rotation observation during deliberate motion:
+- Native image intrinsics and dimensions:
+- Background/foreground result and paused camera indicator:
+- Activity recreation while closing:
+- Display-rotation result:
+- Tracking-loss/recovery result:
+- Native close duration/state transition:
+- Crashes, exceptions, and limitations:
+- Validator and date:
 
 No hardware result should be generalized beyond the measured configuration without evidence.
