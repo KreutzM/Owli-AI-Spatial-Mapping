@@ -6,7 +6,7 @@
 - **Android unit:** diagnostic conversion, installation and permission states, ARCore error mappings, session ownership/lifecycle, asynchronous close gating, GL prerequisites, failure handling, UI publication limits, text/state mappings, and deterministic developer-tooling process tests.
 - **Generic AVD:** app launch, accessibility-visible diagnostic cards, permission action, lifecycle/relaunch behavior, and the unsupported/unavailable AR path.
 - **ARCore emulator spike:** session and virtual-scene tracking only after a dedicated issue.
-- **Galaxy S23+:** real ARCore tracking, pose, native image intrinsics, lifecycle, rotation, and camera-indicator validation for Issue #8; later Depth or mapping claims require their own issue and evidence.
+- **Galaxy S23+:** real ARCore tracking/lifecycle evidence for completed Issue #8 and exact-head Raw Depth capability/confidence/timestamp/rate evidence for Issue #14. Mapping claims remain out of scope.
 
 ## Issue #8 deterministic coverage
 
@@ -34,6 +34,27 @@ The app unit suite uses fake installation/session ports and injected close execu
 - launched/in-flight versus completed permission outcomes;
 - permanent denial only after a completed denied result with no rationale;
 - interrupted requests and revocation/one-time expiration/auto-reset after grant remain requestable.
+
+## Issue #14 Raw Depth deterministic coverage
+
+The app unit suite uses repository-owned fake depth-image/plane ports with fixed byte buffers and deliberate row/pixel padding. It verifies:
+
+- unsupported raw/automatic modes remain non-fatal;
+- `RAW_DEPTH_ONLY` preference and the documented `AUTOMATIC` fallback;
+- no acquisition without tracking or the existing Session/update eligibility gates;
+- separate transient/not-tracking/illegal-state/deadline/resource-exhausted/layout/unexpected outcomes;
+- depth close after confidence-acquire failure and exactly-once close of both images on success;
+- only immutable scalar/statistical data escapes the adapter boundary;
+- unsigned 16-bit little-endian depth, including values above 32767, with zero preserved as unknown;
+- unsigned confidence `0..255`, including the purely diagnostic `>= 128` statistic;
+- arbitrary validated row/pixel strides for both planes and explicit rejection of mismatched dimensions;
+- explicit depth/confidence inconsistency counters;
+- repeated raw-depth timestamp = reprojection, changed timestamp = NEW, with repeated values excluded from the distinct-depth counter;
+- fixed-capacity rolling rate state;
+- clearing of current depth statistics on tracking/lifecycle loss; and
+- bounded Compose publication through the existing latest-value/throttle path.
+
+The generic `pixel2Api35` managed AVD remains an unsupported/unavailable-path check only. It must launch without crash, keep existing diagnostics usable, expose Raw Depth as unavailable/unsupported when applicable, and continue to state that no point cloud or map is constructed. It is not evidence for real Depth support, pixel values, confidence, timestamps, update rate, or S23+ behavior.
 
 ## Issue #11 deterministic tooling coverage
 

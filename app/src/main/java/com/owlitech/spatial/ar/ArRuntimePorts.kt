@@ -1,6 +1,8 @@
 package com.owlitech.spatial.ar
 
 interface DiagnosticSessionPort {
+    val depthConfiguration: DepthConfigurationDiagnostic
+        get() = DepthConfigurationDiagnostic()
     fun resume()
     fun setCameraTextureName(textureId: Int)
     fun setDisplayGeometry(displayRotation: Int, width: Int, height: Int)

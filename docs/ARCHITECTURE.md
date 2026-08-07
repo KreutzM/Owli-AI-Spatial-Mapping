@@ -54,6 +54,16 @@ The GL integration creates only the external texture and viewport required for A
 
 Diagnostic observations use a single-slot latest-value handoff and a minimum publication interval of 125 ms (at most eight regular UI observations per second). Tracking-state changes publish immediately. New pending values replace stale pending values; the frame loop never waits for Compose and no growing queue exists.
 
+### Raw Depth diagnostic boundary
+
+Issue #14 extends the same Session adapter with a bounded Raw Depth capability/measurement slice. Depth support is queried explicitly for `RAW_DEPTH_ONLY` and `AUTOMATIC` before the Session is resumed. `RAW_DEPTH_ONLY` is preferred; `AUTOMATIC` is selected only as the documented fallback when raw-only is unavailable, and an unsupported/configuration-failed result does not turn AR Optional into AR Required.
+
+Depth and confidence are acquired only from the current `Frame` inside the existing GL-thread `Session.update()` call while tracking. The adapter acquires raw depth first and confidence second, copies scalar metadata/statistics, and closes every acquired Android `Image` before returning. `Image`, `Image.Plane`, `ByteBuffer`, `Frame`, and `Camera` never enter controller or Compose state. Pixel addressing is `y * rowStride + x * pixelStride`; layouts are validated rather than assumed tightly packed. Raw depth is decoded as unsigned little-endian 16-bit millimetres and zero remains unknown/no estimate.
+
+A fixed-capacity timestamp window distinguishes distinct NEW raw-depth timestamps from repeated/reprojected timestamps and estimates the observed NEW-depth rate. Full pixel statistics are computed only for NEW timestamps; reprojections update bounded counters/timing without rescanning every pixel. Tracking loss, lifecycle pause, configuration failure, and terminal runtime failure clear the current/last scanned depth statistics. UI publication continues through the existing single-slot 125 ms throttle.
+
+CPU-image and GPU-texture intrinsics dimensions plus display/viewport scalars are copied only for diagnostic comparison. This slice does not assert a depth-to-intrinsics pixel alignment or timestamp-alignment rule and does not invoke the live pinhole projector. The open coordinate questions remain governed by `docs/COORDINATE_SYSTEMS.md` until official API evidence and physical S23+ measurements jointly support a deterministic contract.
+
 ## Installation and camera-permission state
 
 A user-initiated `requestInstall(..., true)` attempt is represented by `ArInstallAttemptState`. The pending bit is saved in Activity instance state and restored after Activity recreation. On the next resume it is cleared before exactly one `requestInstall(..., false)` follow-up, preventing both a lost attempt and an install loop.

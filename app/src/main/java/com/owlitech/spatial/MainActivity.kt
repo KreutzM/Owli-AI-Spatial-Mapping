@@ -33,6 +33,7 @@ import com.owlitech.spatial.ar.CameraPermissionAction
 import com.owlitech.spatial.ar.CameraPermissionRequestOutcome
 import com.owlitech.spatial.ar.CameraPermissionRequestRecord
 import com.owlitech.spatial.ar.CameraPermissionTracker
+import com.owlitech.spatial.ar.DepthDiagnosticState
 import com.owlitech.spatial.ar.DiagnosticGlSurfaceView
 import com.owlitech.spatial.ar.DiagnosticLifecycleCoordinator
 import com.owlitech.spatial.ar.DiagnosticObservation
@@ -50,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private data class SessionUpdate(
         val lifecycle: SessionLifecycleState,
         val observation: DiagnosticObservation?,
+        val depth: DepthDiagnosticState,
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -118,6 +120,7 @@ class MainActivity : ComponentActivity() {
                     diagnosticState = diagnosticState.copy(
                         sessionLifecycle = update.lifecycle,
                         observation = update.observation,
+                        depth = update.depth,
                     )
                 }
             },
@@ -137,8 +140,8 @@ class MainActivity : ComponentActivity() {
                     if (!destroyed) lifecycleCoordinator.onSessionSlotAvailable()
                 }
             },
-            onStateChanged = { lifecycle, observation ->
-                sessionUpdateDispatcher.offer(SessionUpdate(lifecycle, observation))
+            onStateChanged = { lifecycle, observation, depth ->
+                sessionUpdateDispatcher.offer(SessionUpdate(lifecycle, observation, depth))
             },
         )
         diagnosticSurfaceView = DiagnosticGlSurfaceView(this).also {

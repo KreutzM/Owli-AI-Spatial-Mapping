@@ -41,6 +41,7 @@ class MainActivitySmokeTest {
         activityRule.activityRule.scenario.recreate()
 
         activityRule.onNodeWithText("ARCore-Diagnose").assertExists()
+        activityRule.onNodeWithTag(DiagnosticTestTags.RAW_DEPTH_CARD).performScrollTo().assertExists()
         activityRule.onNodeWithTag(DiagnosticTestTags.MAPPING_CARD).performScrollTo().assertExists()
     }
 }

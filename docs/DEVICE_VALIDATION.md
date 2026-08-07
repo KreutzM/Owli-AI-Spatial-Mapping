@@ -1,17 +1,10 @@
 # Galaxy S23+ Validation Record Template
 
-## Issue #8 status
+## Completed predecessor
 
-Physical Galaxy S23+ validation is **pending maintainer** until a completed record is attached to the Draft PR. A generic AVD, fake Session, or self-hosted device of unknown model is not Galaxy S23+ evidence.
+Issue #8 physical Galaxy S23+ validation is complete and recorded on the accepted repository head `31f64d86bde334254ca325deec73cb2b20610012`. Issue #14 must not reuse that record as Depth evidence; its Raw Depth acceptance requires a new exact-head physical run after independent review PASS.
 
-Install the `app-debug.apk` produced from the exact Draft-PR head. Before running, record and verify:
-
-- full 40-character PR head SHA;
-- APK build variant (`debug`) and APK SHA-256;
-- device marketing model and Android model code;
-- Android version and full build identifier;
-- Google Play Services for AR version;
-- battery level, charging state, display orientation, scene, and lighting.
+A generic AVD, fake Session, or self-hosted device of unknown model is not Galaxy S23+ evidence.
 
 ## Windows build/install/launch helper
 
@@ -25,60 +18,63 @@ On Windows with PowerShell 7, Android platform tools, USB debugging, and an auth
 
 The helper resolves the repository from its own path, builds the current checkout with `gradlew.bat :app:assembleDebug`, selects exactly one online ADB device unless `-Serial` is supplied, prints Git/device/APK provenance, installs `app-debug.apk` with `adb install -r`, and launches `com.owlitech.spatial/.MainActivity` unless `-NoLaunch` is used. Every ADB command after selection is scoped with `-s <serial>`.
 
-ADB discovery order is `-AdbPath`, `ANDROID_SDK_ROOT`, `ANDROID_HOME`, then `adb.exe` on `PATH`. Ambiguous, absent, offline, unauthorized, recovery, or sideload targets fail closed. `-NoBuild` is accepted only when the exact APK and the helper-generated provenance sidecar match the current Git HEAD, worktree fingerprint, and APK SHA-256; a failed build removes the prior expected APK before Gradle runs and never proceeds to installation.
+ADB discovery order is `-AdbPath`, `ANDROID_SDK_ROOT`, `ANDROID_HOME`, then `adb.exe` on `PATH`. Ambiguous, absent, offline, unauthorized, recovery, or sideload targets fail closed. `-NoBuild` is accepted only for a clean worktree when the exact APK and helper-generated provenance sidecar match current Git HEAD and APK SHA-256; a failed build removes the prior expected APK before Gradle runs and never proceeds to installation.
 
-App-data clearing and camera-permission grants remain explicit opt-ins:
+The helper prepares and launches the exact checkout; it does **not** determine whether Galaxy S23+ validation passed.
 
-```powershell
-./scripts/Build-Install-Run.ps1 -Serial R58M... -ClearAppData
-./scripts/Build-Install-Run.ps1 -Serial R58M... -GrantCameraPermission
-```
+## Issue #14 merge-blocking Raw Depth validation
 
-`-CaptureLogcat <path>` performs one bounded app-PID-focused `logcat -d` snapshot after launch. It does not leave a background process running.
+Run this only after independent review returns `PASS`, on the exact unchanged reviewed Draft-PR head. Record facts rather than extrapolating to other devices/configurations.
 
-The helper prepares and launches the exact checkout; it does **not** determine whether Galaxy S23+ validation passed. The human observations below must still be completed on the physical device and attached to the Draft PR for the exact head that was installed.
+Exercise at minimum:
 
-Exercise and record all of the following:
+1. Verify the exact Git SHA, debug APK SHA-256, Samsung Galaxy S23+ model/model code, Android build, and Google Play Services for AR version.
+2. Record `isDepthModeSupported(RAW_DEPTH_ONLY)`, `isDepthModeSupported(AUTOMATIC)`, and the mode actually configured.
+3. In a textured indoor scene, record time/motion to first Raw Depth, depth/confidence dimensions and row/pixel strides, several Frame/Depth/Confidence timestamps, and a NEW/REPROJECTED sequence.
+4. Keep acquisition running for at least 30 seconds and record distinct NEW-depth count and observed bounded rate. ARCore's typical rate is context only, not an acceptance threshold.
+5. Record non-zero depth coverage, confidence coverage/range, diagnostic confidence `>= 128` ratio, and observed non-zero depth min/max millimetres. Approximate scene distances are context only, not calibrated measurements.
+6. Repeat coverage/confidence observations for a low-texture/plain-wall scene.
+7. Record CPU-image and GPU-texture intrinsics dimensions/aspects next to depth dimensions/aspect. Do not infer a pixel-scaling/alignment rule from similar dimensions alone.
+8. Exercise tracking loss/occlusion and recovery; stale depth statistics must disappear while not tracking and fresh diagnostics must recover without a crash.
+9. Exercise one background/foreground cycle and one display-rotation cycle.
+10. Record any `ResourceExhaustedException`, crashes, ANRs, other exceptions/ARCore errors, battery state, thermals, and limitations. No resource exhaustion is expected if every acquired image is closed.
 
-1. Start from the actual ARCore installation/update state and note whether the user-initiated install flow was required, completed, or already satisfied.
-2. During an install prompt, recreate the Activity where practical and confirm the restored pending attempt performs one non-looping follow-up after return.
-3. Exercise camera grant, denial/retry, and settings paths. Where the OS/device permits it, revoke or auto-reset a prior grant and confirm the UI remains requestable rather than calling it permanent denial.
-4. Measure time from foreground resume to first `TRACKING` in a suitable scene.
-5. Keep the diagnostic Session running for at least 60 seconds.
-6. Confirm the ARCore frame timestamp progresses.
-7. Deliberately translate and rotate the device; record representative translation values in metres and quaternion values in displayed `(w, x, y, z)` order.
-8. Record native image `fx`, `fy`, `cx`, `cy`, width, and height.
-9. Background and foreground the app once. Confirm diagnostics resume without a duplicate Session or crash and note the camera privacy indicator while paused.
-10. Recreate the Activity once while a Session is being released. Confirm the new instance waits for native close and does not create an overlapping Session.
-11. Rotate the display once and confirm continued operation.
-12. Where reproducible, cause tracking loss and recovery; confirm a lost-tracking observation does not retain a current pose or intrinsics.
-13. Record crashes, exceptions, unexpected status transitions, close duration, and all limitations.
+The record must not claim a point cloud, mapping, occupancy/free-space model, obstacle warning, navigation behavior, or environmental completeness.
 
-The record must not infer Depth support, point-cloud behavior, mapping quality, navigation behavior, or environmental conditions from this diagnostic run.
-
-## Validation record
+## Issue #14 validation record
 
 - Repository head SHA:
 - APK variant and SHA-256:
-- Device model / model code:
-- Android version / build:
+- Device marketing model / model code:
+- Android version / full build:
 - Google Play Services for AR version:
-- Battery / charging:
-- Initial orientation, scene, and lighting:
-- ARCore install/update state and exercised recreation flow:
-- Camera-permission state and exercised flow:
-- Time to first `TRACKING`:
-- Continuous run duration (minimum 60 s):
-- Frame timestamp progression:
-- Translation observation during deliberate motion:
-- Rotation observation during deliberate motion:
-- Native image intrinsics and dimensions:
-- Background/foreground result and paused camera indicator:
-- Activity recreation while closing:
-- Display-rotation result:
+- Battery / charging / thermals:
+- Initial orientation, textured scene, and lighting:
+- `RAW_DEPTH_ONLY` supported:
+- `AUTOMATIC` supported:
+- Selected/configured Depth mode:
+- Time/motion to first Raw Depth:
+- Depth dimensions / rowStride / pixelStride / format classification:
+- Confidence dimensions / rowStride / pixelStride / format classification:
+- Representative Frame / Raw Depth / Confidence timestamps:
+- Representative NEW / REPROJECTED sequence:
+- Continuous measurement duration (minimum 30 s):
+- Distinct NEW-depth count / observed rate:
+- Textured-scene non-zero depth coverage and min/max mm:
+- Textured-scene confidence coverage/range and diagnostic >=128 ratio:
+- Low-texture/plain-wall non-zero depth coverage and min/max mm:
+- Low-texture/plain-wall confidence coverage/range and diagnostic >=128 ratio:
+- Depth/confidence inconsistency counters:
+- Approximate physical scene distances (context only):
+- CPU-image intrinsics dimensions/aspect:
+- GPU-texture intrinsics dimensions/aspect:
+- Depth dimensions/aspect relationship observed (no inferred alignment):
 - Tracking-loss/recovery result:
-- Native close duration/state transition:
-- Crashes, exceptions, and limitations:
+- Background/foreground result:
+- Display-rotation result:
+- Resource exhaustion observed:
+- Crashes / ANRs / exceptions / ARCore errors:
+- Limitations / unresolved alignment or timestamp questions:
 - Validator and date:
 
 No hardware result should be generalized beyond the measured configuration without evidence.

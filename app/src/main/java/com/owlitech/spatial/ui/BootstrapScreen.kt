@@ -26,6 +26,11 @@ import com.owlitech.spatial.ar.ArCapability
 import com.owlitech.spatial.ar.ArDiagnosticState
 import com.owlitech.spatial.ar.CameraPermissionAction
 import com.owlitech.spatial.ar.CameraPermissionState
+import com.owlitech.spatial.ar.DepthAcquisitionStatus
+import com.owlitech.spatial.ar.DepthConfigurationStatus
+import com.owlitech.spatial.ar.DepthDataKind
+import com.owlitech.spatial.ar.DepthDiagnosticState
+import com.owlitech.spatial.ar.DiagnosticDepthMode
 import com.owlitech.spatial.ar.DiagnosticObservation
 import com.owlitech.spatial.ar.DiagnosticTrackingFailureReason
 import com.owlitech.spatial.ar.DiagnosticTrackingState
@@ -43,6 +48,7 @@ object DiagnosticTestTags {
     const val FRAME_CARD = "diagnostic_frame"
     const val POSE_CARD = "diagnostic_pose"
     const val INTRINSICS_CARD = "diagnostic_intrinsics"
+    const val RAW_DEPTH_CARD = "diagnostic_raw_depth"
     const val MAPPING_CARD = "diagnostic_mapping"
     const val GL_SURFACE = "diagnostic_gl_surface"
     const val PERMISSION_ACTION = "diagnostic_permission_action"
@@ -107,6 +113,7 @@ fun BootstrapScreen(
         )
         PoseCard(state.observation)
         IntrinsicsCard(state.observation)
+        RawDepthCard(state.depth)
         StatusCard(
             label = stringResource(R.string.mapping_label),
             value = stringResource(R.string.mapping_not_started),
@@ -204,6 +211,93 @@ private fun IntrinsicsCard(observation: DiagnosticObservation?) {
         testTag = DiagnosticTestTags.INTRINSICS_CARD,
     )
 }
+
+
+@Composable
+private fun RawDepthCard(depth: DepthDiagnosticState) {
+    val configuration = depth.configuration
+    val observation = depth.currentObservation
+    val statistics = observation?.statistics ?: depth.lastNewDataStatistics
+    val statisticsTimestamp = observation?.statistics?.let { observation.rawDepthTimestampNanos }
+        ?: depth.lastNewDataTimestampNanos
+    val value = buildString {
+        append("RAW_DEPTH_ONLY supported: ${yesNo(configuration.rawDepthOnlySupported)}\n")
+        append("AUTOMATIC supported: ${yesNo(configuration.automaticSupported)}\n")
+        append("Selected mode: ${depthModeText(configuration.selectedMode)}\n")
+        append("Configured mode: ${depthModeText(configuration.configuredMode)} / ${configurationStatusText(configuration.status)}\n")
+        append("Acquisition: ${depthStatusText(depth.acquisitionStatus)}\n")
+        append("Frame timestamp: ${observation?.frameTimestampNanos?.let { "$it ns" } ?: "—"}\n")
+        append("Raw-depth timestamp: ${observation?.rawDepthTimestampNanos?.let { "$it ns" } ?: "—"}\n")
+        append("Confidence timestamp: ${observation?.confidenceTimestampNanos?.let { "$it ns" } ?: "—"}\n")
+        append("Sample: ${observation?.dataKind?.let(::depthKindText) ?: "—"}\n")
+        if (observation != null) {
+            append("Depth: ${observation.depthWidth} x ${observation.depthHeight}; rowStride=${observation.depthRowStride}, pixelStride=${observation.depthPixelStride}; format=${observation.depthFormat}\n")
+            append("Confidence: ${observation.confidenceWidth} x ${observation.confidenceHeight}; rowStride=${observation.confidenceRowStride}, pixelStride=${observation.confidencePixelStride}; format=${observation.confidenceFormat}\n")
+            append("Depth aspect=${format(observation.depthAspectRatio)}\n")
+            observation.cpuImageIntrinsics?.let { intrinsics ->
+                append("CPU intrinsics: ${intrinsics.width} x ${intrinsics.height}, aspect=${format(intrinsics.aspectRatio)}, normalized f=(${format(intrinsics.normalizedFx)}, ${format(intrinsics.normalizedFy)}), c=(${format(intrinsics.normalizedCx)}, ${format(intrinsics.normalizedCy)})\n")
+            }
+            observation.gpuTextureIntrinsics?.let { intrinsics ->
+                append("GPU texture intrinsics: ${intrinsics.width} x ${intrinsics.height}, aspect=${format(intrinsics.aspectRatio)}\n")
+            }
+            append("Viewport: rotation=${observation.displayRotation}, ${observation.viewportWidth} x ${observation.viewportHeight}\n")
+        }
+        append("Observed NEW-depth rate: ${String.format(Locale.US, "%.2f", depth.observedNewDepthRateHz)} Hz (${depth.rateWindowSampleCount} samples in bounded window)\n")
+        if (statistics != null) {
+            append("Latest scanned NEW sample: ${statisticsTimestamp ?: "—"} ns\n")
+            append("Non-zero depth: ${statistics.nonZeroDepthCount}/${statistics.totalPixelCount} (${percent(statistics.nonZeroDepthRatio)}); min/max=${statistics.minNonZeroDepthMillimetres ?: "—"}/${statistics.maxNonZeroDepthMillimetres ?: "—"} mm\n")
+            append("Non-zero confidence: ${statistics.nonZeroConfidenceCount}/${statistics.totalPixelCount} (${percent(statistics.nonZeroConfidenceRatio)}); confidence range=${statistics.minConfidence ?: "—"}/${statistics.maxConfidence ?: "—"}\n")
+            append("Confidence >= 128 (diagnostic only): ${statistics.confidenceAtLeast128Count}/${statistics.totalPixelCount} (${percent(statistics.confidenceAtLeast128Ratio)})\n")
+            append("Inconsistencies: depth=0/confidence!=0 ${statistics.zeroDepthNonZeroConfidenceCount}; depth!=0/confidence=0 ${statistics.nonZeroDepthZeroConfidenceCount}\n")
+        } else {
+            append("Pixel statistics: no current scanned NEW sample\n")
+        }
+        val counters = depth.counters
+        append("Counters: attempts=${counters.acquisitionAttempts}, successes=${counters.successes}, distinct NEW=${counters.distinctNewDepthTimestamps}, reprojections=${counters.reprojections}, transient unavailable=${counters.transientUnavailable}, failures=${counters.failures}")
+        depth.detail?.takeIf { it.isNotBlank() }?.let { append("\nDetail: $it") }
+    }
+    StatusCard(
+        label = stringResource(R.string.raw_depth_label),
+        value = value,
+        explanation = stringResource(R.string.raw_depth_explanation),
+        testTag = DiagnosticTestTags.RAW_DEPTH_CARD,
+    )
+}
+
+private fun yesNo(value: Boolean): String = if (value) "yes" else "no"
+
+private fun depthModeText(mode: DiagnosticDepthMode): String = when (mode) {
+    DiagnosticDepthMode.NONE -> "NONE"
+    DiagnosticDepthMode.RAW_DEPTH_ONLY -> "RAW_DEPTH_ONLY"
+    DiagnosticDepthMode.AUTOMATIC -> "AUTOMATIC fallback"
+}
+
+private fun configurationStatusText(status: DepthConfigurationStatus): String = when (status) {
+    DepthConfigurationStatus.UNSUPPORTED -> "unsupported"
+    DepthConfigurationStatus.CONFIGURED -> "configured"
+    DepthConfigurationStatus.CONFIGURATION_FAILED -> "configuration failed"
+}
+
+private fun depthStatusText(status: DepthAcquisitionStatus): String = when (status) {
+    DepthAcquisitionStatus.UNSUPPORTED -> "Unsupported"
+    DepthAcquisitionStatus.CONFIGURED_WAITING_FOR_DATA -> "Configured / WaitingForData"
+    DepthAcquisitionStatus.NEW_DEPTH_DATA -> "NewDepthData"
+    DepthAcquisitionStatus.REPROJECTED_DEPTH_DATA -> "ReprojectedDepthData"
+    DepthAcquisitionStatus.NOT_YET_AVAILABLE -> "NotYetAvailable (transient)"
+    DepthAcquisitionStatus.NOT_TRACKING -> "NotTracking"
+    DepthAcquisitionStatus.ILLEGAL_STATE -> "IllegalState / mode not configured"
+    DepthAcquisitionStatus.DEADLINE_EXCEEDED -> "Deadline/current-frame error"
+    DepthAcquisitionStatus.RESOURCE_EXHAUSTED -> "ResourceExhausted"
+    DepthAcquisitionStatus.INVALID_IMAGE_LAYOUT -> "InvalidImageLayout"
+    DepthAcquisitionStatus.UNEXPECTED_RUNTIME_ERROR -> "UnexpectedRuntimeError"
+}
+
+private fun depthKindText(kind: DepthDataKind): String = when (kind) {
+    DepthDataKind.NEW -> "NEW"
+    DepthDataKind.REPROJECTED -> "REPROJECTED"
+}
+
+private fun percent(value: Double): String = String.format(Locale.US, "%.1f%%", value * 100.0)
 
 @Composable
 private fun permissionText(state: CameraPermissionState): String = when (state) {

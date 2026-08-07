@@ -6,6 +6,7 @@
 | Windows ADB validation helper | `scripts/Build-Install-Run.ps1`, `app/src/test/.../tooling/BuildInstallRunScriptTest.kt`, `docs/DEVICE_VALIDATION.md` |
 | ARCore capability/install | `app/.../ar/ArCoreCapabilityProbe.kt`, `ArInstallController.kt`, manifest |
 | ARCore diagnostic runtime | `app/.../ar/ArDiagnosticSessionController.kt`, `DiagnosticSessionCloseScheduler.kt`, `ArCoreAdapters.kt`, `DiagnosticGlSurfaceView.kt` |
+| Raw Depth diagnostics | `app/.../ar/DepthDiagnostics.kt`, `ArCoreAdapters.kt`, `app/src/test/.../ar/DepthDiagnosticsTest.kt`, `BootstrapScreen.kt` |
 | App shell and diagnostics UI | `app/.../MainActivity.kt`, `app/.../ui/BootstrapScreen.kt` |
 | Coordinate math | `mapping-core/.../geometry/`, `docs/COORDINATE_SYSTEMS.md` |
 | Depth projection | `mapping-core/.../depth/`, projector tests |

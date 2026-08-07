@@ -168,7 +168,7 @@ class ArDiagnosticSessionControllerTest {
             sessionFactory = newFactory,
             sessionCloseScheduler = scheduler,
             onSessionSlotAvailable = { coordinator.onSessionSlotAvailable() },
-            onStateChanged = { _, _ -> },
+            onStateChanged = { _, _, _ -> },
         )
         coordinator = DiagnosticLifecycleCoordinator(
             newController,
@@ -383,7 +383,7 @@ class ArDiagnosticSessionControllerTest {
         val controller = fixture.controller(
             clockNanos = { now },
             minimumPublishIntervalNanos = 125L,
-            onStateChanged = { _, observation -> observations += observation },
+            onStateChanged = { _, observation, _ -> observations += observation },
         )
         controller.setPrerequisitesReady(true)
         controller.resume()
@@ -406,6 +406,93 @@ class ArDiagnosticSessionControllerTest {
         assertNull(observations.last())
     }
 
+    @Test
+    fun depthAcquisitionCannotRunBeforeExistingUpdateEligibilityGates() {
+        val fixture = Fixture()
+        val controller = fixture.controller()
+        controller.setPrerequisitesReady(true)
+        controller.resume()
+        val session = fixture.factory.sessions.single()
+
+        controller.updateFrame()
+        controller.onSurfaceCreated(5)
+        controller.updateFrame()
+        controller.onSurfaceChanged(0, 640, 480)
+        controller.pause()
+        controller.updateFrame()
+
+        assertEquals(0, session.updateCalls)
+    }
+
+    @Test
+    fun pauseClearsPublishedCurrentDepthAndDepthUiPublicationRemainsBounded() {
+        var now = 0L
+        val depthStates = mutableListOf<DepthDiagnosticState>()
+        val fixture = Fixture()
+        val controller = fixture.controller(
+            clockNanos = { now },
+            minimumPublishIntervalNanos = 125L,
+            onStateChanged = { _, _, depth -> depthStates += depth },
+        )
+        controller.setPrerequisitesReady(true)
+        controller.resume()
+        controller.onSurfaceCreated(5)
+        controller.onSurfaceChanged(0, 640, 480)
+        val session = fixture.factory.sessions.single()
+        session.nextDepthDiagnostic = fakeDepthState(10)
+
+        repeat(10) {
+            session.nextTimestamp = it.toLong()
+            controller.updateFrame()
+            now += 10L
+        }
+        val publishedCurrent = depthStates.count { it.currentObservation != null }
+        assertEquals(1, publishedCurrent)
+
+        controller.pause()
+        assertNull(depthStates.last().currentObservation)
+        assertNull(depthStates.last().lastNewDataStatistics)
+    }
+
+    private fun fakeDepthState(timestamp: Long): DepthDiagnosticState {
+        val stats = DepthPixelStatistics(1, 1, 1000, 1000, 1, 255, 255, 1, 0, 0)
+        val configuration = DepthConfigurationDiagnostic(
+            rawDepthOnlySupported = true,
+            automaticSupported = true,
+            selectedMode = DiagnosticDepthMode.RAW_DEPTH_ONLY,
+            configuredMode = DiagnosticDepthMode.RAW_DEPTH_ONLY,
+            status = DepthConfigurationStatus.CONFIGURED,
+        )
+        return DepthDiagnosticState(
+            configuration = configuration,
+            acquisitionStatus = DepthAcquisitionStatus.NEW_DEPTH_DATA,
+            currentObservation = DepthDiagnosticObservation(
+                frameTimestampNanos = timestamp,
+                rawDepthTimestampNanos = timestamp,
+                confidenceTimestampNanos = timestamp,
+                dataKind = DepthDataKind.NEW,
+                depthWidth = 1,
+                depthHeight = 1,
+                confidenceWidth = 1,
+                confidenceHeight = 1,
+                depthRowStride = 2,
+                depthPixelStride = 2,
+                confidenceRowStride = 1,
+                confidencePixelStride = 1,
+                depthFormat = DepthFormatClassification.D_16,
+                confidenceFormat = DepthFormatClassification.Y8,
+                statistics = stats,
+                cpuImageIntrinsics = null,
+                gpuTextureIntrinsics = null,
+                displayRotation = 0,
+                viewportWidth = 640,
+                viewportHeight = 480,
+            ),
+            lastNewDataStatistics = stats,
+            lastNewDataTimestampNanos = timestamp,
+        )
+    }
+
     private class Fixture {
         val events = mutableListOf<String>()
         val closeTasks = QueueExecutor()
@@ -416,7 +503,7 @@ class ArDiagnosticSessionControllerTest {
             clockNanos: () -> Long = System::nanoTime,
             minimumPublishIntervalNanos: Long = 125_000_000L,
             onRuntimeReleaseRequested: (SessionOperation, Throwable) -> Unit = { _, _ -> },
-            onStateChanged: (SessionLifecycleState, DiagnosticObservation?) -> Unit = { _, _ -> },
+            onStateChanged: (SessionLifecycleState, DiagnosticObservation?, DepthDiagnosticState) -> Unit = { _, _, _ -> },
         ) = ArDiagnosticSessionController(
             sessionFactory = factory,
             sessionCloseScheduler = scheduler,
@@ -446,7 +533,7 @@ class ArDiagnosticSessionControllerTest {
     ) = ArDiagnosticSessionController(
         sessionFactory = factory,
         sessionCloseScheduler = scheduler,
-        onStateChanged = { _, _ -> },
+        onStateChanged = { _, _, _ -> },
     )
 
     private object DirectExecutor : Executor {
@@ -494,6 +581,7 @@ class ArDiagnosticSessionControllerTest {
         var textureError: Throwable? = null
         var geometryError: Throwable? = null
         var updateError: Throwable? = null
+        var nextDepthDiagnostic: DepthDiagnosticState? = null
         val frameEvents = mutableListOf<String>()
 
         override fun resume() {
@@ -539,6 +627,7 @@ class ArDiagnosticSessionControllerTest {
                 imageCy = 251.0,
                 imageWidth = 640,
                 imageHeight = 480,
+                depthDiagnostic = nextDepthDiagnostic,
             )
         }
 

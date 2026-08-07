@@ -36,6 +36,8 @@ class BootstrapScreenTest {
         }
 
         composeRule.onNodeWithText("Auf diesem Gerät nicht unterstützt").assertIsDisplayed()
+        composeRule.onNodeWithTag(DiagnosticTestTags.RAW_DEPTH_CARD).performScrollTo().assertExists()
+        composeRule.onNodeWithText("Unsupported", substring = true).assertExists()
         composeRule.onNodeWithTag(DiagnosticTestTags.MAPPING_CARD).performScrollTo()
         composeRule.onNodeWithText("Mapping wurde nicht gestartet").assertIsDisplayed()
         composeRule.onNodeWithTag(DiagnosticTestTags.PERMISSION_ACTION).assertExists()
@@ -66,6 +68,7 @@ class BootstrapScreenTest {
             DiagnosticTestTags.FRAME_CARD,
             DiagnosticTestTags.POSE_CARD,
             DiagnosticTestTags.INTRINSICS_CARD,
+            DiagnosticTestTags.RAW_DEPTH_CARD,
             DiagnosticTestTags.MAPPING_CARD,
         ).forEach { tag ->
             composeRule.onNodeWithTag(tag).performScrollTo().assertExists()
