@@ -237,10 +237,10 @@ internal object DepthPlaneAnalyzer {
                     minDepth = minDepth?.coerceAtMost(depthMillimetres) ?: depthMillimetres
                     maxDepth = maxDepth?.coerceAtLeast(depthMillimetres) ?: depthMillimetres
                 }
-                minConfidence = minConfidence?.coerceAtMost(confidenceValue) ?: confidenceValue
-                maxConfidence = maxConfidence?.coerceAtLeast(confidenceValue) ?: confidenceValue
                 if (confidenceValue != 0) {
                     nonZeroConfidence += 1
+                    minConfidence = minConfidence?.coerceAtMost(confidenceValue) ?: confidenceValue
+                    maxConfidence = maxConfidence?.coerceAtLeast(confidenceValue) ?: confidenceValue
                 }
                 if (confidenceValue >= 128) confidenceAtLeast128 += 1
                 if (depthMillimetres == 0 && confidenceValue != 0) zeroDepthNonZeroConfidence += 1
@@ -320,7 +320,7 @@ internal class RawDepthDiagnosticTracker(
     private val newDepthTimestamps = LongArray(rateWindowCapacity)
     private var rateStart = 0
     private var rateSize = 0
-    private var lastRawDepthTimestampNanos: Long? = null
+    private var lastSeenRawDepthTimestampNanos: Long? = null
     private var counters = DepthDiagnosticCounters()
     private var lastNewStatistics: DepthPixelStatistics? = null
     private var lastNewTimestamp: Long? = null
@@ -361,13 +361,20 @@ internal class RawDepthDiagnosticTracker(
         var confidence: DiagnosticDepthImage? = null
         try {
             depth = source.acquireRawDepth16Bits()
+            val depthImage = requireNotNull(depth)
+            val repeated = lastSeenRawDepthTimestampNanos == depthImage.timestampNanos
+            if (!repeated) {
+                lastSeenRawDepthTimestampNanos = depthImage.timestampNanos
+                addDistinctTimestamp(depthImage.timestampNanos)
+                counters = counters.copy(
+                    distinctNewDepthTimestamps = counters.distinctNewDepthTimestamps + 1,
+                )
+            }
             try {
                 confidence = source.acquireRawDepthConfidence()
-                val depthImage = requireNotNull(depth)
                 val confidenceImage = requireNotNull(confidence)
                 val depthFormat = classifyDepthFormat(depthImage.format)
                 val confidenceFormat = classifyConfidenceFormat(confidenceImage.format)
-                val repeated = lastRawDepthTimestampNanos == depthImage.timestampNanos
 
                 if (repeated) {
                     DepthPlaneAnalyzer.validateMetadata(depthImage, confidenceImage)
@@ -391,13 +398,10 @@ internal class RawDepthDiagnosticTracker(
                     depth = depthImage,
                     confidence = confidenceImage,
                 )
-                lastRawDepthTimestampNanos = depthImage.timestampNanos
                 lastNewStatistics = statistics
                 lastNewTimestamp = depthImage.timestampNanos
-                addDistinctTimestamp(depthImage.timestampNanos)
                 counters = counters.copy(
                     successes = counters.successes + 1,
-                    distinctNewDepthTimestamps = counters.distinctNewDepthTimestamps + 1,
                 )
                 val observation = observation(
                     context = context,

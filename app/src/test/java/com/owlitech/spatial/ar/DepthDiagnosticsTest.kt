@@ -71,6 +71,29 @@ class DepthDiagnosticsTest {
         assertEquals(1, depth.closeCalls)
     }
 
+    @Test fun confidenceFailureStillMarksRawTimestampAsSeen() {
+        val tracker = tracker()
+        val failedDepth = depth(50)
+        val failedSource = object : RawDepthFrameSource {
+            override fun acquireRawDepth16Bits() = failedDepth
+            override fun acquireRawDepthConfidence(): DiagnosticDepthImage =
+                throw DepthAcquisitionException(DepthFailureReason.NOT_YET_AVAILABLE)
+        }
+
+        val failed = tracker.observe(ctx(), failedSource)
+        assertEquals(DepthAcquisitionStatus.NOT_YET_AVAILABLE, failed.acquisitionStatus)
+        assertEquals(1, failedDepth.closeCalls)
+        assertEquals(1L, failed.counters.distinctNewDepthTimestamps)
+        assertEquals(0L, failed.counters.successes)
+
+        val repeated = tracker.observe(ctx(frame = 200), FakeSource(depth(50), confidence(52)))
+        assertEquals(DepthDataKind.REPROJECTED, repeated.currentObservation?.dataKind)
+        assertNull(repeated.currentObservation?.statistics)
+        assertEquals(1L, repeated.counters.distinctNewDepthTimestamps)
+        assertEquals(1L, repeated.counters.reprojections)
+        assertEquals(1L, repeated.counters.successes)
+    }
+
     @Test fun bothImagesCloseExactlyOnceAndOnlyScalarsEscape() {
         val depth = depth(); val confidence = confidence()
         val state = tracker().observe(ctx(), FakeSource(depth, confidence))
@@ -89,7 +112,7 @@ class DepthDiagnosticsTest {
         val s = stats(depth, confidence)
         assertEquals(2, s.nonZeroDepthCount); assertEquals(0x1234, s.minNonZeroDepthMillimetres)
         assertEquals(40000, s.maxNonZeroDepthMillimetres); assertEquals(2, s.nonZeroConfidenceCount)
-        assertEquals(0, s.minConfidence); assertEquals(255, s.maxConfidence); assertEquals(2, s.confidenceAtLeast128Count)
+        assertEquals(128, s.minConfidence); assertEquals(255, s.maxConfidence); assertEquals(2, s.confidenceAtLeast128Count)
     }
 
     @Test fun depthRowAndPixelStridePaddingAreRespected() {
