@@ -96,19 +96,29 @@ class ArDiagnosticSessionController(
         }
     }
 
+    /**
+     * GLSurfaceView.Renderer.onSurfaceCreated is tied to EGL-context lifetime. A new callback means
+     * context-owned GL objects must be treated as new, but it does not by itself make viewport
+     * geometry update-eligible; onSurfaceChanged establishes that separately.
+     */
     fun onSurfaceCreated(textureId: Int) = synchronized(lock) {
         if (terminallyClosed) return@synchronized
-        surfaceReady = textureId > 0
+        surfaceReady = false
         cameraTextureId = textureId
         configuredTextureId = 0
         displayGeometryDirty = true
     }
 
+    /**
+     * GLSurfaceView invokes onSurfaceChanged after it has a usable EGL window surface, including
+     * foreground recreation of that surface when a preserved EGL context skips onSurfaceCreated.
+     */
     fun onSurfaceChanged(displayRotation: Int, width: Int, height: Int) = synchronized(lock) {
         if (terminallyClosed) return@synchronized
         this.displayRotation = displayRotation
         viewportWidth = width
         viewportHeight = height
+        surfaceReady = width > 0 && height > 0
         displayGeometryDirty = true
     }
 
@@ -118,9 +128,15 @@ class ArDiagnosticSessionController(
         displayGeometryDirty = true
     }
 
-    fun onSurfaceDestroyed() = synchronized(lock) {
+    /**
+     * Revokes use of the current render/EGL surface without discarding the context-owned camera
+     * texture. If the EGL context is actually lost, a later onSurfaceCreated replaces that texture.
+     */
+    fun onRenderSurfaceUnavailable() = synchronized(lock) {
         invalidateSurfaceUseLocked()
     }
+
+    fun onSurfaceDestroyed() = onRenderSurfaceUnavailable()
 
     /** Called exclusively from the GLSurfaceView render thread. */
     fun updateFrame() {
@@ -301,6 +317,7 @@ class ArDiagnosticSessionController(
         sessionResumed = false
         session = null
         invalidateSurfaceUseLocked()
+        configuredTextureId = 0
         clearCurrentObservationLocked()
         setLifecycleLocked(SessionLifecycleState.Closing)
         return ReleasePlan(
@@ -373,10 +390,9 @@ class ArDiagnosticSessionController(
         return operation to error
     }
 
+    /** Invalidates only the render/EGL-surface and viewport lifetime, not the EGL texture object. */
     private fun invalidateSurfaceUseLocked() {
         surfaceReady = false
-        cameraTextureId = 0
-        configuredTextureId = 0
         viewportWidth = 0
         viewportHeight = 0
         displayGeometryDirty = true
