@@ -35,6 +35,17 @@ The app unit suite uses fake installation/session ports and injected close execu
 - permanent denial only after a completed denied result with no rationale;
 - interrupted requests and revocation/one-time expiration/auto-reset after grant remain requestable.
 
+The focused `ArDiagnosticSurfaceLifecycleTest` models EGL-context and EGL-window-surface events separately. Without sleeps, it verifies:
+
+- initial context creation plus positive surface geometry is required before the first update;
+- pause revokes render-surface eligibility before `Session.pause()`, and an update attempt at that boundary is blocked;
+- pause clears current ARCore and Raw Depth observations;
+- a preserved-context foreground succeeds with no second renderer `onSurfaceCreated()` callback: the existing texture is retained, a new `onSurfaceChanged()` restores the render surface/display geometry, the same Session resumes, and updates continue;
+- foreground recovery does not require Activity/controller recreation and does not create a second Session;
+- true EGL-context recreation supplies a new texture and rebinds it before the next update rather than reusing the old texture state;
+- repeated pause/resume cycles are idempotent and continue to use one Session and one preserved texture when the context survives; and
+- updates remain gated until Session and render-surface prerequisites are all ready.
+
 ## Issue #14 Raw Depth deterministic coverage
 
 The app unit suite uses repository-owned fake depth-image/plane ports with fixed byte buffers and deliberate row/pixel padding. It verifies:
