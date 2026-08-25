@@ -175,6 +175,7 @@ data class ArDiagnosticState(
     val cameraPermission: CameraPermissionState = CameraPermissionState.NOT_REQUESTED,
     val sessionLifecycle: SessionLifecycleState = SessionLifecycleState.WaitingForPrerequisites,
     val observation: DiagnosticObservation? = null,
+    val depth: DepthDiagnosticState = DepthDiagnosticState(),
 )
 
 data class DiagnosticFrameScalars(
@@ -194,6 +195,7 @@ data class DiagnosticFrameScalars(
     val imageCy: Double? = null,
     val imageWidth: Int? = null,
     val imageHeight: Int? = null,
+    val depthDiagnostic: DepthDiagnosticState? = null,
 )
 
 internal fun DiagnosticFrameScalars.toWorldFromCameraOrNull(): RigidTransform? {

@@ -41,11 +41,14 @@ class DiagnosticGlSurfaceView @JvmOverloads constructor(
     override fun pauseSurface() {
         if (!surfaceLifecycleResumed) return
         surfaceLifecycleResumed = false
+        // Stop controller eligibility before GLSurfaceView.onPause() waits for the render thread.
+        // The EGL context may survive, so the context-owned camera texture remains valid.
+        controller?.onRenderSurfaceUnavailable()
         onPause()
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        controller?.onSurfaceDestroyed()
+        controller?.onRenderSurfaceUnavailable()
         super.surfaceDestroyed(holder)
     }
 }
@@ -79,11 +82,13 @@ private class DiagnosticRenderer(
             GLES20.GL_TEXTURE_WRAP_T,
             GLES20.GL_CLAMP_TO_EDGE,
         )
+        // GLSurfaceView invokes this callback for renderer start / EGL-context recreation.
         controller()?.onSurfaceCreated(textureId)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
+        // This also runs when a preserved context receives a new EGL window surface on foreground.
         controller()?.onSurfaceChanged(currentDisplayRotation(), width, height)
     }
 

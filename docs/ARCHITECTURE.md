@@ -34,14 +34,16 @@ The foreground and pause order is:
 1. Activity resume establishes current installation and camera-permission facts.
 2. The `GLSurfaceView` starts paused. When both prerequisites are ready and the process-wide Session slot is available, the controller creates at most one Session and calls `Session.resume()`.
 3. Only after the Session reaches `Running` does `GLSurfaceView.onResume()` start or resume the render thread.
-4. A valid GL surface creates one external OES texture. Surface size and display rotation are recorded as display geometry.
-5. Only the GLSurfaceView render thread calls `setCameraTextureName`, `setDisplayGeometry`, and `Session.update()`.
-6. Activity pause calls `GLSurfaceView.onPause()` first, then `Session.pause()` on the lifecycle caller. A successful ordinary pause retains the Session for foreground reuse.
+4. EGL-context creation/recreation invokes `Renderer.onSurfaceCreated()`, which creates the external OES camera texture. A usable Android window/EGL surface is a separate lifetime: `Renderer.onSurfaceChanged()` marks that render surface usable and records its positive viewport/display geometry.
+5. Only the GLSurfaceView render thread calls `setCameraTextureName`, `setDisplayGeometry`, and `Session.update()` after the Session, camera texture, render surface, and viewport prerequisites are all current.
+6. Activity pause first revokes render-surface/update eligibility and calls `GLSurfaceView.onPause()`, then calls `Session.pause()` on the lifecycle caller. A successful ordinary pause retains the Session and, when Android preserves the EGL context, retains the context-owned camera texture for foreground reuse.
+
+`DiagnosticGlSurfaceView` uses `preserveEGLContextOnPause = true`, so the EGL context/camera texture and the Android window/EGL surface must not be treated as the same lifetime. A normal background transition can destroy the EGL window surface while retaining the context. In that case foreground may receive `Renderer.onSurfaceChanged()` for the new window surface without a second `Renderer.onSurfaceCreated()`. Surface loss therefore clears only render-surface readiness and viewport geometry; it does not discard the retained camera texture ID. The next positive `onSurfaceChanged()` restores render eligibility and makes display geometry dirty before `Session.update()` can run. If the EGL context is actually recreated, `onSurfaceCreated()` supplies a new texture ID, resets the per-Session configured texture binding, and `onSurfaceChanged()` is still required before updates resume.
 
 Terminal release, prerequisite loss, pause failure, and frame-stage failure use an explicit asynchronous close boundary:
 
 1. The surface/render loop is stopped before the lifecycle release continuation.
-2. Under the controller lock, update eligibility is revoked, `sessionResumed` is cleared, the Session is removed from the active owner slot, texture/display-geometry use is invalidated, and current observation/pose/intrinsics are cleared.
+2. Under the controller lock, update eligibility is revoked, `sessionResumed` is cleared, the Session is removed from the active owner slot, render-surface/display-geometry use is invalidated, the detached Session's configured texture binding is reset, and current observation/pose/intrinsics are cleared. A context-owned GL texture may remain valid until actual EGL-context recreation, but no detached Session may use it.
 3. If the Session had been resumed, `Session.pause()` runs on the lifecycle caller after leaving the controller lock.
 4. `DiagnosticSessionCloseScheduler` moves the process-wide slot from `OWNED` to `CLOSING` and invokes native `Session.close()` on one bounded background worker.
 5. The slot becomes available only after native close returns. Until then, a recreated Activity may wait but cannot create another Session.
@@ -50,9 +52,19 @@ Terminal release, prerequisite loss, pause failure, and frame-stage failure use 
 
 A frame-stage failure revokes update eligibility on the render thread immediately. It posts a lifecycle continuation that stops the surface, pauses the Session on main, detaches ownership, and schedules close. No subsequent frame can use the detached Session.
 
-The GL integration creates only the external texture and viewport required for ARCore updates. It does not draw the camera image and introduces no 3D engine. A missing context, texture, or positive viewport prevents updates.
+The GL integration creates only the external texture and viewport required for ARCore updates. It does not draw the camera image and introduces no 3D engine. A non-running Session, missing camera texture, unavailable render surface, or non-positive viewport prevents updates. Display geometry is re-applied after every usable-surface restoration and after display-rotation changes.
 
 Diagnostic observations use a single-slot latest-value handoff and a minimum publication interval of 125 ms (at most eight regular UI observations per second). Tracking-state changes publish immediately. New pending values replace stale pending values; the frame loop never waits for Compose and no growing queue exists.
+
+### Raw Depth diagnostic boundary
+
+Issue #14 extends the same Session adapter with a bounded Raw Depth capability/measurement slice. Depth support is queried explicitly for `RAW_DEPTH_ONLY` and `AUTOMATIC` before the Session is resumed. `RAW_DEPTH_ONLY` is preferred; `AUTOMATIC` is selected only as the documented fallback when raw-only is unavailable, and an unsupported/configuration-failed result does not turn AR Optional into AR Required.
+
+Depth and confidence are acquired only from the current `Frame` inside the existing GL-thread `Session.update()` call while tracking. The adapter acquires raw depth first and confidence second, copies scalar metadata/statistics, and closes every acquired Android `Image` before returning. `Image`, `Image.Plane`, `ByteBuffer`, `Frame`, and `Camera` never enter controller or Compose state. Pixel addressing is `y * rowStride + x * pixelStride`; layouts are validated rather than assumed tightly packed. Raw depth is decoded as unsigned little-endian 16-bit millimetres and zero remains unknown/no estimate.
+
+A fixed-capacity timestamp window distinguishes distinct NEW raw-depth timestamps from repeated/reprojected timestamps and estimates the observed NEW-depth rate. Full pixel statistics are computed only for NEW timestamps; reprojections update bounded counters/timing without rescanning every pixel. Tracking loss, lifecycle pause, configuration failure, and terminal runtime failure clear the current/last scanned depth statistics. UI publication continues through the existing single-slot 125 ms throttle.
+
+CPU-image and GPU-texture intrinsics dimensions plus display/viewport scalars are copied only for diagnostic comparison. This slice does not assert a depth-to-intrinsics pixel alignment or timestamp-alignment rule and does not invoke the live pinhole projector. The open coordinate questions remain governed by `docs/COORDINATE_SYSTEMS.md` until official API evidence and physical S23+ measurements jointly support a deterministic contract.
 
 ## Installation and camera-permission state
 

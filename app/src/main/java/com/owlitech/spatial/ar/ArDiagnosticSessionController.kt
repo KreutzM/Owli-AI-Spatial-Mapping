@@ -15,7 +15,7 @@ class ArDiagnosticSessionController(
     private val minimumPublishIntervalNanos: Long = 125_000_000L,
     private val onRuntimeReleaseRequested: (SessionOperation, Throwable) -> Unit = { _, _ -> },
     private val onSessionSlotAvailable: (() -> Unit)? = null,
-    private val onStateChanged: (SessionLifecycleState, DiagnosticObservation?) -> Unit,
+    private val onStateChanged: (SessionLifecycleState, DiagnosticObservation?, DepthDiagnosticState) -> Unit,
 ) {
     private data class ReleasePlan(
         val session: DiagnosticSessionPort,
@@ -43,11 +43,12 @@ class ArDiagnosticSessionController(
     private var displayGeometryDirty = true
 
     private var lastObservation: DiagnosticObservation? = null
+    private var lastDepthDiagnostic: DepthDiagnosticState = DepthDiagnosticState()
     private var lastPublishedObservation: DiagnosticObservation? = null
     private var lastPublishedAtNanos = Long.MIN_VALUE
 
     init {
-        publish(lifecycleState, null)
+        publish(lifecycleState, null, lastDepthDiagnostic)
     }
 
     fun setPrerequisitesReady(ready: Boolean) {
@@ -95,19 +96,29 @@ class ArDiagnosticSessionController(
         }
     }
 
+    /**
+     * GLSurfaceView.Renderer.onSurfaceCreated is tied to EGL-context lifetime. A new callback means
+     * context-owned GL objects must be treated as new, but it does not by itself make viewport
+     * geometry update-eligible; onSurfaceChanged establishes that separately.
+     */
     fun onSurfaceCreated(textureId: Int) = synchronized(lock) {
         if (terminallyClosed) return@synchronized
-        surfaceReady = textureId > 0
+        surfaceReady = false
         cameraTextureId = textureId
         configuredTextureId = 0
         displayGeometryDirty = true
     }
 
+    /**
+     * GLSurfaceView invokes onSurfaceChanged after it has a usable EGL window surface, including
+     * foreground recreation of that surface when a preserved EGL context skips onSurfaceCreated.
+     */
     fun onSurfaceChanged(displayRotation: Int, width: Int, height: Int) = synchronized(lock) {
         if (terminallyClosed) return@synchronized
         this.displayRotation = displayRotation
         viewportWidth = width
         viewportHeight = height
+        surfaceReady = width > 0 && height > 0
         displayGeometryDirty = true
     }
 
@@ -117,9 +128,15 @@ class ArDiagnosticSessionController(
         displayGeometryDirty = true
     }
 
-    fun onSurfaceDestroyed() = synchronized(lock) {
+    /**
+     * Revokes use of the current render/EGL surface without discarding the context-owned camera
+     * texture. If the EGL context is actually lost, a later onSurfaceCreated replaces that texture.
+     */
+    fun onRenderSurfaceUnavailable() = synchronized(lock) {
         invalidateSurfaceUseLocked()
     }
+
+    fun onSurfaceDestroyed() = onRenderSurfaceUnavailable()
 
     /** Called exclusively from the GLSurfaceView render thread. */
     fun updateFrame() {
@@ -155,8 +172,10 @@ class ArDiagnosticSessionController(
             }
 
             try {
-                val observation = observationConverter.convert(ownedSession.update())
+                val scalars = ownedSession.update()
+                val observation = observationConverter.convert(scalars)
                 lastObservation = observation
+                scalars.depthDiagnostic?.let { lastDepthDiagnostic = it }
                 publishObservationIfDueLocked(observation)
             } catch (error: Throwable) {
                 runtimeFailure = stopUpdatesForRuntimeFailureLocked(SessionOperation.UPDATE, error)
@@ -256,7 +275,9 @@ class ArDiagnosticSessionController(
         return try {
             sessionFactory.create().also { created ->
                 session = created
+                lastDepthDiagnostic = RawDepthDiagnosticTracker(created.depthConfiguration).initialState()
                 waitingForSessionSlot = false
+                publish(lifecycleState, lastObservation, lastDepthDiagnostic)
             }
         } catch (error: Throwable) {
             sessionCloseScheduler.releaseSessionSlot()
@@ -296,6 +317,7 @@ class ArDiagnosticSessionController(
         sessionResumed = false
         session = null
         invalidateSurfaceUseLocked()
+        configuredTextureId = 0
         clearCurrentObservationLocked()
         setLifecycleLocked(SessionLifecycleState.Closing)
         return ReleasePlan(
@@ -354,7 +376,7 @@ class ArDiagnosticSessionController(
         if (stateChanged || intervalElapsed) {
             lastPublishedAtNanos = now
             lastPublishedObservation = observation
-            publish(lifecycleState, observation)
+            publish(lifecycleState, observation, lastDepthDiagnostic)
         }
     }
 
@@ -368,10 +390,9 @@ class ArDiagnosticSessionController(
         return operation to error
     }
 
+    /** Invalidates only the render/EGL-surface and viewport lifetime, not the EGL texture object. */
     private fun invalidateSurfaceUseLocked() {
         surfaceReady = false
-        cameraTextureId = 0
-        configuredTextureId = 0
         viewportWidth = 0
         viewportHeight = 0
         displayGeometryDirty = true
@@ -381,17 +402,28 @@ class ArDiagnosticSessionController(
         lastObservation = null
         lastPublishedObservation = null
         lastPublishedAtNanos = Long.MIN_VALUE
+        lastDepthDiagnostic = lastDepthDiagnostic.copy(
+            acquisitionStatus = when (lastDepthDiagnostic.configuration.status) {
+                DepthConfigurationStatus.UNSUPPORTED -> DepthAcquisitionStatus.UNSUPPORTED
+                DepthConfigurationStatus.CONFIGURED -> DepthAcquisitionStatus.CONFIGURED_WAITING_FOR_DATA
+                DepthConfigurationStatus.CONFIGURATION_FAILED -> DepthAcquisitionStatus.ILLEGAL_STATE
+            },
+            currentObservation = null,
+            lastNewDataStatistics = null,
+            lastNewDataTimestampNanos = null,
+            detail = lastDepthDiagnostic.configuration.detail,
+        )
     }
 
     private fun setLifecycleLocked(state: SessionLifecycleState) {
         if (lifecycleState == state) return
         lifecycleState = state
-        publish(state, lastObservation)
+        publish(state, lastObservation, lastDepthDiagnostic)
     }
 
     private fun setErrorLocked(operation: SessionOperation, error: Throwable) {
         lifecycleState = errorState(operation, error)
-        publish(lifecycleState, null)
+        publish(lifecycleState, null, lastDepthDiagnostic)
     }
 
     private fun errorState(operation: SessionOperation, error: Throwable): SessionLifecycleState.Error {
@@ -406,7 +438,8 @@ class ArDiagnosticSessionController(
     private fun publish(
         state: SessionLifecycleState,
         observation: DiagnosticObservation?,
-    ) = onStateChanged(state, observation)
+        depth: DepthDiagnosticState,
+    ) = onStateChanged(state, observation, depth)
 }
 
 class DiagnosticLifecycleCoordinator(

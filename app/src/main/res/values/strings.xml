@@ -9,9 +9,11 @@
     <string name="frame_timestamp_label">ARCore-Frame-Zeitstempel</string>
     <string name="pose_label">Aktuelle Kamerapose</string>
     <string name="intrinsics_label">Native Image-Intrinsics</string>
+    <string name="raw_depth_label">Raw Depth diagnostics</string>
+    <string name="raw_depth_explanation">Bounded Raw-Depth/Confidence capability and scalar diagnostics only. Confidence 128 is shown only as a diagnostic statistic. No point cloud or map is constructed; alignment with camera intrinsics remains unclaimed until physical evidence resolves it.</string>
     <string name="mapping_label">Mapping</string>
     <string name="mapping_not_started">Mapping wurde nicht gestartet</string>
-    <string name="mapping_explanation">Die Anzeige ist reine ARCore-Diagnostik. Es werden keine Karten-, Tiefen- oder Punktwolkendaten erzeugt.</string>
+    <string name="mapping_explanation">Die Anzeige ist reine ARCore-Diagnostik. Raw-Depth/Confidence werden nur für bounded Statistiken gelesen; es werden keine Punktwolke und keine Karte erzeugt.</string>
     <string name="check_again">Erneut prüfen</string>
     <string name="install_arcore">ARCore installieren/aktualisieren</string>
     <string name="request_camera">Kameraberechtigung anfragen</string>

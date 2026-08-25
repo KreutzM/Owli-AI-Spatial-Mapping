@@ -2,13 +2,20 @@ package com.owlitech.spatial.ar
 
 import android.app.Activity
 import android.content.Context
+import android.media.Image
 import com.google.ar.core.ArCoreApk
+import com.google.ar.core.Config
+import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.DeadlineExceededException
 import com.google.ar.core.exceptions.FatalException
 import com.google.ar.core.exceptions.MissingGlContextException
+import com.google.ar.core.exceptions.NotTrackingException
+import com.google.ar.core.exceptions.NotYetAvailableException
+import com.google.ar.core.exceptions.ResourceExhaustedException
 import com.google.ar.core.exceptions.SessionNotPausedException
 import com.google.ar.core.exceptions.SessionPausedException
 import com.google.ar.core.exceptions.TextureNotSetException
@@ -22,16 +29,67 @@ class ArCoreDiagnosticSessionFactory(context: Context) : DiagnosticSessionFactor
     private val applicationContext = context.applicationContext
 
     override fun create(): DiagnosticSessionPort = try {
-        ArCoreDiagnosticSessionPort(Session(applicationContext))
+        val session = Session(applicationContext)
+        ArCoreDiagnosticSessionPort(
+            session = session,
+            depthConfiguration = configureDepthDiagnostics(session),
+        )
     } catch (error: Throwable) {
         throw error.asRuntimeException()
+    }
+}
+
+private fun configureDepthDiagnostics(session: Session): DepthConfigurationDiagnostic {
+    var rawSupported = false
+    var automaticSupported = false
+    return try {
+        rawSupported = session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)
+        automaticSupported = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
+        val selected = selectDiagnosticDepthMode(rawSupported, automaticSupported)
+        if (selected == DiagnosticDepthMode.NONE) {
+            DepthConfigurationDiagnostic(
+                rawDepthOnlySupported = rawSupported,
+                automaticSupported = automaticSupported,
+                selectedMode = DiagnosticDepthMode.NONE,
+                status = DepthConfigurationStatus.UNSUPPORTED,
+            )
+        } else {
+            val config = Config(session)
+            config.depthMode = when (selected) {
+                DiagnosticDepthMode.RAW_DEPTH_ONLY -> Config.DepthMode.RAW_DEPTH_ONLY
+                DiagnosticDepthMode.AUTOMATIC -> Config.DepthMode.AUTOMATIC
+                DiagnosticDepthMode.NONE -> Config.DepthMode.DISABLED
+            }
+            session.configure(config)
+            DepthConfigurationDiagnostic(
+                rawDepthOnlySupported = rawSupported,
+                automaticSupported = automaticSupported,
+                selectedMode = selected,
+                configuredMode = selected,
+                status = DepthConfigurationStatus.CONFIGURED,
+            )
+        }
+    } catch (error: RuntimeException) {
+        DepthConfigurationDiagnostic(
+            rawDepthOnlySupported = rawSupported,
+            automaticSupported = automaticSupported,
+            selectedMode = selectDiagnosticDepthMode(rawSupported, automaticSupported),
+            status = DepthConfigurationStatus.CONFIGURATION_FAILED,
+            detail = error.message?.take(160),
+        )
     }
 }
 
 private class ArCoreDiagnosticSessionPort(
     /** The only retained ARCore runtime object. This adapter exclusively owns it until close(). */
     private val session: Session,
+    override val depthConfiguration: DepthConfigurationDiagnostic,
 ) : DiagnosticSessionPort {
+    private val depthTracker = RawDepthDiagnosticTracker(depthConfiguration)
+    private var displayRotation = 0
+    private var viewportWidth = 0
+    private var viewportHeight = 0
+
     override fun resume() = translateErrors { session.resume() }
 
     override fun setCameraTextureName(textureId: Int) = translateErrors {
@@ -42,10 +100,13 @@ private class ArCoreDiagnosticSessionPort(
     override fun setDisplayGeometry(displayRotation: Int, width: Int, height: Int) = translateErrors {
         require(width > 0 && height > 0) { "Display dimensions must be positive." }
         session.setDisplayGeometry(displayRotation, width, height)
+        this.displayRotation = displayRotation
+        viewportWidth = width
+        viewportHeight = height
     }
 
     override fun update(): DiagnosticFrameScalars = translateErrors {
-        // Frame, Camera, Pose and CameraIntrinsics are method-local and never escape this call.
+        // Frame/Camera/Pose/Intrinsics/Image/Plane/ByteBuffer remain method-local to this call.
         val frame = session.update()
         val camera = frame.camera
         val trackingState = camera.trackingState.toDiagnosticTrackingState()
@@ -56,16 +117,42 @@ private class ArCoreDiagnosticSessionPort(
                 frameTimestampNanos = frame.timestamp,
                 trackingState = trackingState,
                 trackingFailureReason = trackingFailureReason,
+                depthDiagnostic = depthTracker.observe(
+                    context = DepthFrameContext(
+                        frameTimestampNanos = frame.timestamp,
+                        tracking = false,
+                        cpuImageIntrinsics = null,
+                        gpuTextureIntrinsics = null,
+                        displayRotation = displayRotation,
+                        viewportWidth = viewportWidth,
+                        viewportHeight = viewportHeight,
+                    ),
+                    source = null,
+                ),
             )
         }
 
         val pose = camera.pose
         val translation = pose.translation
         val quaternion = pose.rotationQuaternion
-        val imageIntrinsics = camera.imageIntrinsics
-        val focalLength = imageIntrinsics.focalLength
-        val principalPoint = imageIntrinsics.principalPoint
-        val imageDimensions = imageIntrinsics.imageDimensions
+        val imageIntrinsics = camera.imageIntrinsics.toDiagnosticIntrinsics()
+        val textureIntrinsics = camera.textureIntrinsics.toDiagnosticIntrinsics()
+        val depthDiagnostic = depthTracker.observe(
+            context = DepthFrameContext(
+                frameTimestampNanos = frame.timestamp,
+                tracking = true,
+                cpuImageIntrinsics = imageIntrinsics,
+                gpuTextureIntrinsics = textureIntrinsics,
+                displayRotation = displayRotation,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+            ),
+            source = if (depthConfiguration.status == DepthConfigurationStatus.CONFIGURED) {
+                ArCoreRawDepthFrameSource(frame)
+            } else {
+                null
+            },
+        )
 
         DiagnosticFrameScalars(
             frameTimestampNanos = frame.timestamp,
@@ -78,18 +165,97 @@ private class ArCoreDiagnosticSessionPort(
             arCoreQuaternionY = quaternion[1].toDouble(),
             arCoreQuaternionZ = quaternion[2].toDouble(),
             arCoreQuaternionW = quaternion[3].toDouble(),
-            imageFx = focalLength[0].toDouble(),
-            imageFy = focalLength[1].toDouble(),
-            imageCx = principalPoint[0].toDouble(),
-            imageCy = principalPoint[1].toDouble(),
-            imageWidth = imageDimensions[0],
-            imageHeight = imageDimensions[1],
+            imageFx = imageIntrinsics.fx,
+            imageFy = imageIntrinsics.fy,
+            imageCx = imageIntrinsics.cx,
+            imageCy = imageIntrinsics.cy,
+            imageWidth = imageIntrinsics.width,
+            imageHeight = imageIntrinsics.height,
+            depthDiagnostic = depthDiagnostic,
         )
     }
 
     override fun pause() = translateErrors { session.pause() }
 
     override fun close() = translateErrors { session.close() }
+}
+
+private fun com.google.ar.core.CameraIntrinsics.toDiagnosticIntrinsics(): DiagnosticCameraIntrinsics {
+    val focal = focalLength
+    val principal = principalPoint
+    val dimensions = imageDimensions
+    return DiagnosticCameraIntrinsics(
+        fx = focal[0].toDouble(),
+        fy = focal[1].toDouble(),
+        cx = principal[0].toDouble(),
+        cy = principal[1].toDouble(),
+        width = dimensions[0],
+        height = dimensions[1],
+    )
+}
+
+private class ArCoreRawDepthFrameSource(
+    private val frame: Frame,
+) : RawDepthFrameSource {
+    override fun acquireRawDepth16Bits(): DiagnosticDepthImage =
+        acquireDepthImage { frame.acquireRawDepthImage16Bits() }
+
+    override fun acquireRawDepthConfidence(): DiagnosticDepthImage =
+        acquireDepthImage { frame.acquireRawDepthConfidenceImage() }
+
+    private inline fun acquireDepthImage(block: () -> Image): DiagnosticDepthImage = try {
+        AndroidDiagnosticDepthImage(block())
+    } catch (error: Throwable) {
+        throw error.asDepthAcquisitionException()
+    }
+}
+
+private class AndroidDiagnosticDepthImage(
+    private val image: Image,
+) : DiagnosticDepthImage {
+    override val width: Int get() = image.width
+    override val height: Int get() = image.height
+    override val timestampNanos: Long get() = image.timestamp
+    override val format: Int get() = image.format
+
+    override fun plane(): DiagnosticDepthPlane = try {
+        val planes = image.planes
+        if (planes.size != 1) {
+            throw DepthAcquisitionException(
+                DepthFailureReason.INVALID_IMAGE_LAYOUT,
+                "Expected exactly one image plane, got ${planes.size}.",
+            )
+        }
+        val plane = planes[0]
+        ByteBufferDepthPlane(
+            buffer = plane.buffer,
+            rowStride = plane.rowStride,
+            pixelStride = plane.pixelStride,
+        )
+    } catch (error: DepthAcquisitionException) {
+        throw error
+    } catch (error: RuntimeException) {
+        throw DepthAcquisitionException(
+            DepthFailureReason.INVALID_IMAGE_LAYOUT,
+            error.message,
+            error,
+        )
+    }
+
+    override fun close() = image.close()
+}
+
+private fun Throwable.asDepthAcquisitionException(): DepthAcquisitionException = when (this) {
+    is DepthAcquisitionException -> this
+    is NotYetAvailableException -> DepthAcquisitionException(DepthFailureReason.NOT_YET_AVAILABLE, message, this)
+    is NotTrackingException -> DepthAcquisitionException(DepthFailureReason.NOT_TRACKING, message, this)
+    is IllegalStateException -> DepthAcquisitionException(DepthFailureReason.ILLEGAL_STATE, message, this)
+    is DeadlineExceededException -> DepthAcquisitionException(DepthFailureReason.DEADLINE_EXCEEDED, message, this)
+    is ResourceExhaustedException -> DepthAcquisitionException(DepthFailureReason.RESOURCE_EXHAUSTED, message, this)
+    is IndexOutOfBoundsException,
+    is UnsupportedOperationException,
+    -> DepthAcquisitionException(DepthFailureReason.INVALID_IMAGE_LAYOUT, message, this)
+    else -> throw this
 }
 
 class ArCoreInstallAdapter(
